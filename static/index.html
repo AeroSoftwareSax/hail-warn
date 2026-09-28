@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>HAILWARN | Severe Hail Detection & Early Warning Radar</title>
+  <meta name="description" content="Real-time multi-source hail warning system combining NWS alerts, mPING crowdsourced ground reports, NEXRAD radar reflectivity (dBZ), and atmospheric soundings.">
+
+  <!-- Leaflet Map CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+  
+  <!-- Font Awesome Icons -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css"/>
+
+  <!-- Google Fonts: Inter & JetBrains Mono -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body class="theme-ops">
+
+  <!-- TOP HEADER / HUD -->
+  <header class="ops-header">
+    <div class="header-brand">
+      <div class="brand-icon pulse-soft">
+        <i class="fa-solid fa-cloud-bolt"></i>
+      </div>
+      <div class="brand-text">
+        <div class="brand-title">HAIL<span>WARN</span> <span class="badge-live"><i class="fa-solid fa-circle"></i> LIVE OPS</span></div>
+        <div class="brand-sub">MULTI-SOURCE HAIL DETECTION & SENSOR FUSION SYSTEM</div>
+      </div>
+    </div>
+
+    <!-- Search & Location Bar -->
+    <div class="search-container">
+      <div class="search-input-wrap">
+        <i class="fa-solid fa-magnifying-glass search-icon"></i>
+        <input type="text" id="location-input" placeholder="Search city, county, ZIP or address..." autocomplete="off">
+        <button id="clear-search-btn" class="icon-btn-clear" title="Clear search" style="display: none;">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
+      </div>
+      <div id="search-dropdown" class="search-dropdown"></div>
+
+      <button id="geo-btn" class="ops-btn btn-primary" title="Detect GPS location">
+        <i class="fa-solid fa-location-crosshairs"></i> <span>My Location</span>
+      </button>
+
+      <button id="refresh-btn" class="ops-btn btn-secondary" title="Force refresh radar and reports">
+        <i class="fa-solid fa-arrows-rotate" id="refresh-icon"></i> <span id="refresh-label">Refresh</span>
+      </button>
+    </div>
+
+    <!-- System Controls & Audio Alarm Status -->
+    <div class="header-controls">
+      <!-- Hotspots Quick Menu -->
+      <div class="dropdown-wrap">
+        <button id="hotspots-btn" class="ops-btn btn-hotspots">
+          <i class="fa-solid fa-bolt-lightning text-amber"></i> <span>Live Hotspots</span> <i class="fa-solid fa-chevron-down"></i>
+        </button>
+        <div id="hotspots-menu" class="dropdown-menu">
+          <div class="dropdown-header">Active Severe Hotspots & Hail Zones</div>
+          <div id="hotspots-list" class="hotspots-list">
+            <div class="dropdown-item-loading"><i class="fa-solid fa-spinner fa-spin"></i> Scanning US alerts...</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Audio Alarm Control -->
+      <div class="alarm-controls">
+        <button id="alarm-toggle-btn" class="ops-btn btn-alarm active" title="Toggle Audio Siren on High Threat">
+          <i class="fa-solid fa-volume-high" id="alarm-icon"></i> <span>Siren: ON</span>
+        </button>
+        <button id="test-siren-btn" class="ops-btn btn-icon-only" title="Test Alert Siren (Web Audio API)">
+          <i class="fa-solid fa-bell"></i>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- SECONDARY HUD STATUS BAR -->
+  <section class="ops-status-bar">
+    <div class="current-loc-badge">
+      <i class="fa-solid fa-location-dot text-cyan"></i>
+      <span class="label">LOCATION:</span>
+      <span id="loc-display-name" class="value">Locating...</span>
+      <span id="loc-coords" class="sub-value"></span>
+    </div>
+
+    <div class="status-metrics">
+      <div class="metric-pill">
+        <span class="m-label">THREAT LEVEL</span>
+        <span id="threat-badge" class="danger-badge danger-none">INITIALIZING</span>
+      </div>
+
+      <div class="metric-pill">
+        <span class="m-label">HAIL RISK SCORE</span>
+        <span id="threat-score" class="score-val">--%</span>
+      </div>
+
+      <div class="metric-pill">
+        <span class="m-label">MAX HAIL SIZE</span>
+        <span id="max-hail-val" class="hail-val">--</span>
+      </div>
+
+      <div class="metric-pill hide-mobile">
+        <span class="m-label">EST. REFLECTIVITY</span>
+        <span id="dbz-val" class="dbz-val">-- dBZ</span>
+      </div>
+
+      <div class="metric-pill hide-mobile">
+        <span class="m-label">NEXT AUTO-REFRESH</span>
+        <span id="countdown-val" class="timer-val">60s</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- MAIN DASHBOARD CONTENT -->
+  <main class="ops-main">
+
+    <!-- LEFT / CENTER: INTERACTIVE RADAR & REPORT MAP -->
+    <div class="map-viewport-panel">
+      <!-- Leaflet Map Container -->
+      <div id="radar-map" class="radar-map-container"></div>
+
+      <!-- Radar Animation & HUD Overlay Controls -->
+      <div class="radar-hud-controls">
+        <div class="hud-playback-bar">
+          <button id="radar-play-btn" class="hud-btn" title="Play / Pause Radar Loop">
+            <i class="fa-solid fa-play" id="play-btn-icon"></i>
+          </button>
+          <button id="radar-prev-btn" class="hud-btn" title="Step Back Frame">
+            <i class="fa-solid fa-backward-step"></i>
+          </button>
+          
+          <div class="hud-timeline-wrap">
+            <input type="range" id="radar-scrubber" min="0" max="0" value="0" step="1" title="Scrub radar time">
+            <div class="hud-time-indicators">
+              <span id="radar-time-label" class="hud-time-text">Loading radar frames...</span>
+              <span id="radar-type-label" class="hud-type-badge">LIVE dBZ</span>
+            </div>
+          </div>
+
+          <button id="radar-next-btn" class="hud-btn" title="Step Forward Frame">
+            <i class="fa-solid fa-forward-step"></i>
+          </button>
+        </div>
+
+        <div class="hud-layers-bar">
+          <!-- Opacity Slider -->
+          <div class="hud-opacity-slider">
+            <i class="fa-solid fa-circle-half-stroke" title="Radar Opacity"></i>
+            <input type="range" id="radar-opacity" min="10" max="100" value="75" title="Radar Opacity">
+            <span id="opacity-label">75%</span>
+          </div>
+
+          <!-- Layer Toggles -->
+          <div class="hud-toggles">
+            <label class="toggle-pill" title="Toggle active NWS warnings polygons">
+              <input type="checkbox" id="toggle-polygons" checked>
+              <span>NWS Warnings</span>
+            </label>
+            <label class="toggle-pill" title="Toggle mPING and Spotter hail reports">
+              <input type="checkbox" id="toggle-reports" checked>
+              <span>mPING / LSR</span>
+            </label>
+            <label class="toggle-pill" title="Toggle 5, 15, 30-mile hail warning rings">
+              <input type="checkbox" id="toggle-rings" checked>
+              <span>Threat Rings</span>
+            </label>
+            <label class="toggle-pill" title="Toggle High-Res IEM NEXRAD Base Reflectivity">
+              <input type="checkbox" id="toggle-nexrad-base">
+              <span>IEM NEXRAD</span>
+            </label>
+          </div>
+        </div>
+      </div>
+
+      <!-- Radar dBZ Legend Overlay -->
+      <div class="radar-legend-card">
+        <div class="legend-header">
+          <span><i class="fa-solid fa-chart-simple"></i> REFLECTIVITY (dBZ) SCALE</span>
+          <span class="legend-sub">HAIL DETECTION THRESHOLDS</span>
+        </div>
+        <div class="legend-bar">
+          <div class="bar-step c-10" title="5-20 dBZ: Light precipitation"><span>15</span></div>
+          <div class="bar-step c-25" title="25-35 dBZ: Moderate rain"><span>30</span></div>
+          <div class="bar-step c-40" title="40-45 dBZ: Heavy rain / Graupel"><span>40</span></div>
+          <div class="bar-step c-50" title="50-55 dBZ: Severe storm / Hail likely"><span>50</span></div>
+          <div class="bar-step c-60" title="60-65 dBZ: Large / Destructive Hail"><span>60</span></div>
+          <div class="bar-step c-70" title="70+ dBZ: Giant Hail Core / Wet Hail Spike"><span>70+</span></div>
+        </div>
+        <div class="legend-ticks">
+          <span>Light</span>
+          <span>Rain</span>
+          <span>Graupel</span>
+          <span class="text-orange">Hail >0.75"</span>
+          <span class="text-red">Large 1.5"+</span>
+          <span class="text-purple">Giant 2.5"+</span>
+        </div>
+      </div>
+
+      <!-- Map Hint Notice -->
+      <div class="map-interactive-hint">
+        <i class="fa-solid fa-computer-mouse"></i> Click anywhere on map to inspect hail threat at that coordinate
+      </div>
+    </div>
+
+    <!-- RIGHT: MULTI-SOURCE SENSOR FUSION & THREAT INTELLIGENCE -->
+    <aside class="ops-intel-sidebar">
+
+      <!-- CARD 1: THREAT DIRECTIVE BANNER -->
+      <div class="intel-card alert-directive-card">
+        <div class="card-eyebrow">
+          <i class="fa-solid fa-shield-halved"></i>
+          <span>PROTECTIVE ACTION DIRECTIVE</span>
+          <span id="intel-timestamp" class="timestamp">--:--:-- UTC</span>
+        </div>
+        <div id="directive-text" class="directive-text">
+          Scanning meteorological feeds and satellite radar for convective hail signatures...
+        </div>
+        <div id="threat-reasons-container" class="threat-reasons-list">
+          <!-- Populated dynamically -->
+        </div>
+      </div>
+
+      <!-- CARD 2: MULTI-SOURCE VERIFICATION MATRIX -->
+      <div class="intel-card">
+        <div class="card-eyebrow">
+          <i class="fa-solid fa-cubes-stacked"></i>
+          <span>MULTI-SOURCE SENSOR FUSION MATRIX</span>
+          <span class="badge-free">100% OPEN DATA</span>
+        </div>
+
+        <div class="matrix-grid">
+          <!-- Source 1: NWS Official -->
+          <div class="matrix-cell" id="matrix-nws">
+            <div class="cell-head">
+              <span class="source-name"><i class="fa-solid fa-landmark-dome text-blue"></i> NWS Alerts</span>
+              <span class="source-status" id="nws-status">CHECKING</span>
+            </div>
+            <div class="cell-body">
+              <div class="cell-data-row">
+                <span class="d-label">Warning Tag:</span>
+                <span class="d-val text-amber" id="nws-hail-tag">None</span>
+              </div>
+              <div class="cell-data-row">
+                <span class="d-label">Threat Mode:</span>
+                <span class="d-val" id="nws-threat-mode">None</span>
+              </div>
+              <div class="cell-sub" id="nws-event-summary">No active bulletins for point</div>
+            </div>
+          </div>
+
+          <!-- Source 2: mPING & LSR Ground Reports -->
+          <div class="matrix-cell" id="matrix-mping">
+            <div class="cell-head">
+              <span class="source-name"><i class="fa-solid fa-users text-cyan"></i> mPING / LSR Reports</span>
+              <span class="source-status" id="mping-status">CHECKING</span>
+            </div>
+            <div class="cell-body">
+              <div class="cell-data-row">
+                <span class="d-label">Closest Hail:</span>
+                <span class="d-val text-orange" id="mping-closest-dist">--</span>
+              </div>
+              <div class="cell-data-row">
+                <span class="d-label">Reported Size:</span>
+                <span class="d-val" id="mping-closest-size">--</span>
+              </div>
+              <div class="cell-sub" id="mping-summary">Scanning 45-mile perimeter</div>
+            </div>
+          </div>
+
+          <!-- Source 3: RainViewer dBZ Radar -->
+          <div class="matrix-cell" id="matrix-radar">
+            <div class="cell-head">
+              <span class="source-name"><i class="fa-solid fa-satellite-dish text-green"></i> Radar Reflectivity</span>
+              <span class="source-status" id="radar-status">ONLINE</span>
+            </div>
+            <div class="cell-body">
+              <div class="cell-data-row">
+                <span class="d-label">Core Intensity:</span>
+                <span class="d-val" id="radar-core-level">Normal</span>
+              </div>
+              <div class="cell-data-row">
+                <span class="d-label">Precipitation:</span>
+                <span class="d-val" id="radar-precip-rate">0 mm/h</span>
+              </div>
+              <div class="cell-sub" id="radar-summary">RainViewer NEXRAD Loop active</div>
+            </div>
+          </div>
+
+          <!-- Source 4: Open-Meteo Convective Sounding -->
+          <div class="matrix-cell" id="matrix-convective">
+            <div class="cell-head">
+              <span class="source-name"><i class="fa-solid fa-volcano text-purple"></i> Atmospheric Sounding</span>
+              <span class="source-status" id="convective-status">ONLINE</span>
+            </div>
+            <div class="cell-body">
+              <div class="cell-data-row">
+                <span class="d-label">Peak CAPE:</span>
+                <span class="d-val" id="sounding-cape">-- J/kg</span>
+              </div>
+              <div class="cell-data-row">
+                <span class="d-label">Lifted Index:</span>
+                <span class="d-val" id="sounding-li">--</span>
+              </div>
+              <div class="cell-sub" id="sounding-summary">Evaluating thermodynamic buoyancy</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- CARD 3: HAIL SIZE VISUAL COMPARISON & DAMAGE RISKS -->
+      <div class="intel-card">
+        <div class="card-eyebrow">
+          <i class="fa-solid fa-scale-balanced"></i>
+          <span>HAIL DIAMETER & DAMAGE IMPACT SCALE</span>
+        </div>
+
+        <div class="hail-scale-display">
+          <div class="scale-visual-wrap">
+            <div id="hail-disc" class="hail-disc-graphic">
+              <div class="hail-disc-inner"></div>
+              <span id="hail-disc-diameter">0.00"</span>
+            </div>
+            <div class="scale-info">
+              <div class="scale-title" id="hail-scale-title">No Active Hail Detected</div>
+              <div class="scale-desc" id="hail-scale-desc">Atmosphere stable. No damaging hail anticipated.</div>
+            </div>
+          </div>
+
+          <div class="damage-risk-meter">
+            <div class="risk-col">
+              <span class="r-icon"><i class="fa-solid fa-car-side"></i></span>
+              <span class="r-name">Vehicles</span>
+              <span class="r-status" id="risk-vehicle">LOW</span>
+            </div>
+            <div class="risk-col">
+              <span class="r-icon"><i class="fa-solid fa-house-chimney"></i></span>
+              <span class="r-name">Roofs & Siding</span>
+              <span class="r-status" id="risk-roof">LOW</span>
+            </div>
+            <div class="risk-col">
+              <span class="r-icon"><i class="fa-solid fa-person"></i></span>
+              <span class="r-name">Outdoor Safety</span>
+              <span class="r-status" id="risk-human">SAFE</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- CARD 4: RECENT GROUND REPORTS & BULLETINS FEED -->
+      <div class="intel-card flex-grow-card">
+        <div class="card-eyebrow">
+          <i class="fa-solid fa-list-check"></i>
+          <span>VERIFIED GROUND OBSERVATIONS & BULLETINS (<span id="feed-count">0</span>)</span>
+        </div>
+
+        <div class="feed-tabs">
+          <button class="feed-tab active" data-tab="all">All</button>
+          <button class="feed-tab" data-tab="mping">mPING</button>
+          <button class="feed-tab" data-tab="spotter">NWS Spotters</button>
+          <button class="feed-tab" data-tab="alerts">NWS Warnings</button>
+        </div>
+
+        <div id="intel-feed-list" class="intel-feed-list">
+          <div class="empty-feed">
+            <i class="fa-solid fa-check-double text-green"></i>
+            <p>No recent hail reports or severe alerts within the 45-mile monitoring perimeter.</p>
+          </div>
+        </div>
+      </div>
+
+    </aside>
+  </main>
+
+  <!-- Leaflet & JS Libs -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+  <script src="app.js"></script>
+</body>
+</html>
