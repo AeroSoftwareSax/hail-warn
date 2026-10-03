@@ -10,12 +10,12 @@
 
 ## Executive Summary
 
-A comprehensive code audit and hardening engagement was conducted across the HailWarn severe hail monitoring codebase. All 18 security vulnerabilities and code defect findings identified during the architecture survey have been successfully remediated, verified with automated regression tests, and audited with static analysis and security scanning tools.
+A comprehensive code audit and hardening engagement was conducted across the HailWarn severe hail monitoring codebase. All 26 security vulnerabilities and code defect findings (SEC-01..07, DEF-01..19) identified during the architecture survey and adversarial fuzzing evaluation have been successfully remediated, verified with automated regression tests, and audited with static analysis and security scanning tools.
 
 ### Key Metrics
-- **Total Findings Audited**: 18
-- **Remediated & Verified**: 18 (100%)
-- **Test Suite Pass Rate**: 100% (41 of 41 tests passing offline in 0.83s)
+- **Total Findings Audited**: 26
+- **Remediated & Verified**: 26 (100%)
+- **Test Suite Pass Rate**: 100% (53 of 53 tests passing offline in 0.84s)
 - **SAST (Bandit -ll)**: 0 Medium / 0 High issues
 - **Dependency Audit (pip-audit)**: 0 CVE vulnerabilities found
 - **Secret Scan (Gitleaks)**: 0 secrets detected
@@ -45,6 +45,14 @@ A comprehensive code audit and hardening engagement was conducted across the Hai
 | **DEF-09** | Non-Deterministic Live Network Dependency in Test Suite | Medium | `test_server.py:45-200`, `test_hail_core.py:1-96` | Fixed | `test_def09_offline_deterministic_test_suite` |
 | **DEF-10** | Unclosed `HTTPError` Generating `ResourceWarning` Tempfile Leak | Low | `server.py:245, 287`, `hail_core.py:160`, `test_server.py:228, 510, 645` | Fixed | `test_def10_http_error_closed_without_resource_warning` |
 | **DEF-11** | Lack of Fault Isolation in Multi-Sensor `perform_full_assessment` | High | `hail_core.py:1105-1125` | Fixed | `test_def11_assessment_graceful_sensor_degradation` |
+| **DEF-12** | GeoJSON Top-Level `features: null` Handling | High | `hail_core.py:215-225, 290-305, 540-580` | Fixed | `test_def12_fuzz_null_features_handling` |
+| **DEF-13** | Null Feature Items & Corrupt Property Dictionaries in Feature Collections | High | `hail_core.py:220-230, 305-320, 540-555, 615-630` | Fixed | `test_def13_fuzz_null_feature_items_and_properties` |
+| **DEF-14** | Type Invariant Crashes on Non-String Motion & Wind Parameter Tags | High | `hail_core.py:560-600, 630-660` | Fixed | `test_def14_fuzz_non_string_motion_and_wind_tags` |
+| **DEF-15** | String Floats, Negative, and Garbage Input Rejection in Hail Size Description | Medium | `hail_core.py:90-125` | Fixed | `test_def15_fuzz_string_hail_size_coercion` |
+| **DEF-16** | String Floats and Corrupted Arrays in Open-Meteo Physics Model | Medium | `hail_core.py:385-480` | Fixed | `test_def16_fuzz_open_meteo_string_and_malformed_physics` |
+| **DEF-17** | Non-Float Attributes in Multi-Sensor Risk Evaluation and LSR Reports | High | `hail_core.py:1010-1120` | Fixed | `test_def17_fuzz_lsr_and_multi_sensor_non_float_attributes` |
+| **DEF-18** | Upstream Feed Outage Handling & Fallback Schema Preservation in Hotspots | High | `hail_core.py:890-950`, `server.py:248-260` | Fixed | `test_def18_national_hotspots_upstream_outage_null_response`, `test_def18_api_hotspots_outage_fallback_endpoint` |
+| **DEF-19** | Strict Socket Transport Firewall & Deterministic Offline Mock Coverage | High | `test_server.py:883-941` | Fixed | `test_def19_offline_determinism_socket_firewall`, `test_def19_offline_mock_coverage_completeness` |
 
 ---
 
@@ -176,16 +184,73 @@ A comprehensive code audit and hardening engagement was conducted across the Hai
 - **Fix Applied**: Implemented `safe_future_result(future, default, sensor_name)` which catches exceptions per-future, logs sensor degradation, and returns safe fallback data.
 - **Regression Test**: `test_def11_assessment_graceful_sensor_degradation` simulates failure in Open-Meteo convective sensor and confirms the multi-sensor pipeline continues cleanly.
 
+### DEF-12: GeoJSON Top-Level `features: null` Handling
+- **Severity**: High (CWE-476)
+- **Files**: `hail_core.py:215-225, 290-305, 540-580`
+- **Root Cause**: Upstream NWS and IEM GeoJSON endpoints intermittently return `{"type": "FeatureCollection", "features": null}` when zero warnings are active. Traversing `data.get('features')` without type checks caused `TypeError: 'NoneType' object is not iterable`.
+- **Fix Applied**: Added explicit `isinstance(data.get('features'), list)` checks across `fetch_nws_point_alerts`, `fetch_iem_lsr_reports`, and `fetch_active_nws_warnings`. If `features` is null or non-list, functions return safe empty list/collections.
+- **Regression Test**: `test_def12_fuzz_null_features_handling` passes `{"features": null}` across all warning and report collectors, confirming clean execution without exceptions.
+
+### DEF-13: Null Feature Items & Corrupt Property Dictionaries in Feature Collections
+- **Severity**: High (CWE-476, CWE-754)
+- **Files**: `hail_core.py:220-230, 305-320, 540-555, 615-630`
+- **Root Cause**: Feeds containing non-dict or null items inside `features` arrays (e.g. `[None, 42, {"properties": null}]`) caused `AttributeError: 'NoneType' object has no attribute 'get'` when accessing properties or geometry.
+- **Fix Applied**: Validated `isinstance(f, dict)` for each feature item; coerced `properties` and `geometry` to dictionaries using defensive ternary expressions (`f.get('properties') if isinstance(f.get('properties'), dict) else {}`), and skipped features with missing or empty `event` names.
+- **Regression Test**: `test_def13_fuzz_null_feature_items_and_properties` passes collections containing None, integers, strings, and null properties, verifying valid features are preserved while corrupt items are cleanly dropped.
+
+### DEF-14: Type Invariant Crashes on Non-String Motion & Wind Parameter Tags
+- **Severity**: High (CWE-704, CWE-248)
+- **Files**: `hail_core.py:560-600, 630-660`
+- **Root Cause**: NWS warning parameters dictionaries containing non-string or null elements (e.g. `eventMotionDescription: [None]`, `maxWindGust: [80]`) caused `TypeError` in regex searches or container containment checks (`'80' in wind_tags[0]`).
+- **Fix Applied**: Added type checking and safe string extraction for `motion_str` before regex matching (`isinstance(m_raw, str)`). Coerced `wind_tags` to string before inspection, and defaulted unparseable motion vectors to `None`.
+- **Regression Test**: `test_def14_fuzz_non_string_motion_and_wind_tags` tests NoneType, integer, dict, and boolean tags across motion and wind parameters, confirming zero crashes and safe fallbacks.
+
+### DEF-15: String Floats, Negative, and Garbage Input Rejection in Hail Size Description
+- **Severity**: Medium (CWE-704, CWE-1284)
+- **Files**: `hail_core.py:90-125`
+- **Root Cause**: `describe_hail_size` compared `inches <= 0` directly. When string floats (`"1.75"`) or non-numeric strings (`"unknown"`) were provided, Python raised `TypeError: '<=' not supported between instances of 'str' and 'int'`.
+- **Fix Applied**: Implemented `_safe_float` coercion on `inches`. Coerced positive string floats into standard hail category descriptions (e.g., `"1.0"` -> `"Quarter"`, `"1.75"` -> `"Golf Ball"`, `"2.75"` -> `"Baseball"`). Filtered out non-positive values, NaNs, infinities, and unparseable strings to safely return `"None"`.
+- **Regression Test**: `test_def15_fuzz_string_hail_size_coercion` exercises valid string floats, negative values, NaNs, infinities, and non-string inputs.
+
+### DEF-16: String Floats and Corrupted Arrays in Open-Meteo Physics Model
+- **Severity**: Medium (CWE-704)
+- **Files**: `hail_core.py:385-480`
+- **Root Cause**: Upstream Open-Meteo current temperatures or hourly physics soundings serialized as strings caused `TypeError: unsupported operand type(s) for /: 'str' and 'int'` during Celsius-to-Fahrenheit conversion and Hail Potential Index calculation.
+- **Fix Applied**: Implemented `_safe_float` for scalar temperatures, pressures, and wind speeds. Implemented `_safe_float_list` for hourly sounding arrays (`cape`, `lifted_index`, `convective_inhibition`, `freezing_level_height`), discarding corrupt non-numeric elements.
+- **Regression Test**: `test_def16_fuzz_open_meteo_string_and_malformed_physics` feeds string temperatures and hourly arrays with corrupt elements, verifying accurate physical calculations.
+
+### DEF-17: Non-Float Attributes in Multi-Sensor Risk Evaluation and LSR Reports
+- **Severity**: High (CWE-704, CWE-754)
+- **Files**: `hail_core.py:1010-1120`
+- **Root Cause**: LSR reports, NWS alerts, and regional warnings with string numbers (`distance_miles: "3.5"`, `hail_size_in: "1.75"`) caused `TypeError` in threshold comparisons and `ValueError: Unknown format code 'f' for object of type 'str'` during risk rationale string formatting (`{dist:.1f} mi`).
+- **Fix Applied**: Applied `_safe_float` across all distance, hail size, and age metrics before threshold comparisons and string formatting. Invalid non-numeric entries default safely to null or are discarded.
+- **Regression Test**: `test_def17_fuzz_lsr_and_multi_sensor_non_float_attributes` exercises string-encoded floats and non-numeric garbage across LSR reports, point alerts, convective soundings, and regional warnings.
+
+### DEF-18: Upstream Feed Outage Handling & Fallback Schema Preservation in Hotspots
+- **Severity**: High (CWE-754, CWE-390)
+- **Files**: `hail_core.py:890-950`, `server.py:248-260`
+- **Root Cause**: When upstream NWS feed experienced network timeouts or outages, `http_get_json()` returned `None`. In `fetch_active_national_hotspots`, attempting `data.get('features')` threw `AttributeError`, causing `/api/hotspots` to catch the error and return empty `[]` instead of populating standard hail alley fallback zones.
+- **Fix Applied**: Coalesced `data = http_get_json(url) or {}`. If `data` is empty or lacks features, `fetch_active_national_hotspots` returns the 4 standard hail alley zones (DFW, OKC, Denver, Wichita). Hardened `server.py` `handle_hotspots` to guarantee consistent JSON schema `{ 'hotspots': [...] }`.
+- **Regression Test**: `test_def18_national_hotspots_upstream_outage_null_response` and `test_def18_api_hotspots_outage_fallback_endpoint` simulate NWS outages and verify HTTP 200 with 4 fallback hotspots.
+
+### DEF-19: Strict Socket Transport Firewall & Deterministic Offline Mock Coverage
+- **Severity**: High (Reliability & Test Integrity)
+- **Files**: `test_server.py:883-941`
+- **Root Cause**: Without socket-level transport firewalls, integration tests could inadvertently attempt live external connections if mocks were incomplete, causing test flakiness and CI failures in offline environments.
+- **Fix Applied**: Added transport-level `socket.socket.connect` firewall monkeypatch in `test_def19_offline_determinism_socket_firewall`, asserting zero external outbound connections during full multi-sensor assessment, warnings, hotspots, radar, and outlook queries. Verified complete mock fixture coverage for all external endpoints in `test_def19_offline_mock_coverage_completeness`.
+- **Regression Test**: `test_def19_offline_determinism_socket_firewall` and `test_def19_offline_mock_coverage_completeness`.
+
 ---
 
 ## Verification & Compliance Results
 
 ### 1. Automated Test Suite
 - Command: `python3 -m unittest discover -v`
-- Result: **OK (41 tests passed in 0.831s)**
+- Result: **OK (53 tests passed in 0.836s)**
 - Coverage:
   - 17 baseline integration and unit tests
-  - 18 regression tests covering SEC-01..07 and DEF-01..11
+  - 26 regression tests covering SEC-01..07 and DEF-01..19
+  - 4 UI XSS/CSP and server fallback verification tests
   - 6 offline core algorithm unit tests in `test_hail_core.py`
 
 ### 2. Python SAST (Bandit)

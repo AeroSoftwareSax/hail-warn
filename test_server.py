@@ -15,6 +15,7 @@ import json
 import urllib.request
 import urllib.error
 import warnings
+import socket
 from server import run_server, HailWarnRequestHandler, ThreadedHTTPServer, STATIC_DIR
 from hail_core import (
     describe_hail_size,
@@ -659,6 +660,353 @@ class TestServerEndpoints(unittest.TestCase):
             self.assertEqual(res['convective_data'], {})
             self.assertIn('score', res['assessment'])
 
+    def test_def12_fuzz_null_features_handling(self):
+        """DEF-12: Verify GeoJSON feeds with {'features': null} degrade cleanly to empty collections."""
+        null_payload = {"type": "FeatureCollection", "features": None}
+
+        # 1. Test fetch_active_nws_warnings
+        with mock.patch('hail_core.http_get_json', return_value=null_payload):
+            warn_res = fetch_active_nws_warnings(lat=32.7767, lon=-96.7970)
+            self.assertIsInstance(warn_res, dict)
+            self.assertEqual(warn_res['count'], 0)
+            self.assertEqual(warn_res['warnings'], [])
+            self.assertEqual(warn_res['geojson']['type'], 'FeatureCollection')
+            self.assertEqual(warn_res['geojson']['features'], [])
+
+        # 2. Test fetch_nws_point_alerts
+        with mock.patch('hail_core.http_get_json', return_value=null_payload):
+            alerts = fetch_nws_point_alerts(32.7767, -96.7970)
+            self.assertIsInstance(alerts, list)
+            self.assertEqual(len(alerts), 0)
+
+        # 3. Test fetch_iem_lsr_reports
+        with mock.patch('hail_core.http_get_json', return_value=null_payload):
+            reports = fetch_iem_lsr_reports(32.7767, -96.7970)
+            self.assertIsInstance(reports, list)
+            self.assertEqual(len(reports), 0)
+
+    def test_def13_fuzz_null_feature_items_and_properties(self):
+        """DEF-13: Verify features array containing [None], non-dicts, or null properties are filtered safely."""
+        corrupt_features = {
+            "type": "FeatureCollection",
+            "features": [
+                None,
+                42,
+                "corrupt_element",
+                {"properties": None, "geometry": None},
+                {"properties": {}, "geometry": None},
+                {
+                    "id": "valid.alert.1",
+                    "properties": {
+                        "id": "valid.alert.1",
+                        "event": "Severe Thunderstorm Warning",
+                        "severity": "Severe",
+                        "description": "HAIL...1.50 INCHES",
+                        "parameters": {"maxHailSize": ["1.50"]}
+                    },
+                    "geometry": {
+                        "type": "Polygon",
+                        "coordinates": [[[-96.8, 32.7], [-96.7, 32.7], [-96.7, 32.8], [-96.8, 32.7]]]
+                    }
+                }
+            ]
+        }
+
+        with mock.patch('hail_core.http_get_json', return_value=corrupt_features):
+            # Test in active warnings
+            warn_res = fetch_active_nws_warnings(lat=32.7767, lon=-96.7970)
+            self.assertEqual(warn_res['count'], 1)
+            self.assertEqual(warn_res['warnings'][0]['id'], 'valid.alert.1')
+            self.assertEqual(warn_res['warnings'][0]['hail_size_in'], 1.50)
+
+            # Test in point alerts
+            alerts = fetch_nws_point_alerts(32.7767, -96.7970)
+            self.assertEqual(len(alerts), 1)
+            self.assertEqual(alerts[0]['id'], 'valid.alert.1')
+            self.assertEqual(alerts[0]['hail_size_in'], 1.50)
+
+    def test_def14_fuzz_non_string_motion_and_wind_tags(self):
+        """DEF-14: Verify non-string motion/wind tags ([None], integers, booleans) do not crash regex or containment."""
+        test_cases = [
+            ([None], [None], "NoneType tags"),
+            ([123], [80], "Integer tags"),
+            ([{"deg": 240}], [{"gust": 80}], "Dict tags"),
+            ([True], [False], "Boolean tags"),
+            (["invalid string without pattern"], ["60 MPH"], "Malformed motion string")
+        ]
+
+        for motion_val, wind_val, case_name in test_cases:
+            with self.subTest(case=case_name):
+                payload = {
+                    "type": "FeatureCollection",
+                    "features": [{
+                        "id": f"test.motion.{case_name}",
+                        "properties": {
+                            "event": "Severe Thunderstorm Warning",
+                            "severity": "Severe",
+                            "parameters": {
+                                "eventMotionDescription": motion_val,
+                                "maxWindGust": wind_val,
+                                "maxHailSize": ["1.25"]
+                            }
+                        },
+                        "geometry": {
+                            "type": "Polygon",
+                            "coordinates": [[[-96.8, 32.7], [-96.7, 32.7], [-96.7, 32.8], [-96.8, 32.7]]]
+                        }
+                    }]
+                }
+                with mock.patch('hail_core.http_get_json', return_value=payload):
+                    warn_res = fetch_active_nws_warnings(lat=32.7767, lon=-96.7970)
+                    self.assertEqual(warn_res['count'], 1)
+                    w = warn_res['warnings'][0]
+                    self.assertEqual(w['hail_size_in'], 1.25)
+                    self.assertIsNone(w['motion'])  # Malformed motion tag defaults safely to None
+
+    def test_def15_fuzz_string_hail_size_coercion(self):
+        """DEF-15: Verify describe_hail_size coerces string numbers and handles garbage inputs safely."""
+        # 1. Valid string floats matching standard hail table
+        self.assertIn("Quarter", describe_hail_size("1.0"))
+        self.assertIn("Golf Ball", describe_hail_size("1.75"))
+        self.assertIn("Baseball", describe_hail_size("2.75"))
+        self.assertIn("Softball+", describe_hail_size("5.0"))
+
+        # 2. Zero and negative string numbers
+        self.assertEqual(describe_hail_size("0"), "None")
+        self.assertEqual(describe_hail_size("0.0"), "None")
+        self.assertEqual(describe_hail_size("-1.5"), "None")
+
+        # 3. Garbage strings, NaNs, and infinities
+        self.assertEqual(describe_hail_size("unknown"), "None")
+        self.assertEqual(describe_hail_size("N/A"), "None")
+        self.assertEqual(describe_hail_size(""), "None")
+        self.assertEqual(describe_hail_size("nan"), "None")
+        self.assertEqual(describe_hail_size("inf"), "None")
+
+        # 4. Non-string, non-numeric types
+        self.assertEqual(describe_hail_size(None), "None")
+        self.assertEqual(describe_hail_size([]), "None")
+        self.assertEqual(describe_hail_size({}), "None")
+
+    def test_def16_fuzz_open_meteo_string_and_malformed_physics(self):
+        """DEF-16: Verify Open-Meteo payload with string floats and corrupted arrays parses cleanly."""
+        payload = {
+            "current": {
+                "temperature_2m": "24.5",
+                "relative_humidity_2m": "72",
+                "precipitation": "0.0",
+                "wind_speed_10m": "15.0",
+                "wind_gusts_10m": "28.0",
+                "wind_direction_10m": "180",
+                "surface_pressure": "1010.5",
+                "weather_code": "3"
+            },
+            "hourly": {
+                "cape": ["2200", "2400", "invalid_cape"],
+                "lifted_index": ["-4.5", "-5.2", "bad_li"],
+                "convective_inhibition": ["-15", "-20"],
+                "freezing_level_height": ["3600", "3550", "corrupt_fz"]
+            }
+        }
+        with mock.patch('hail_core.http_get_json', return_value=payload):
+            res = fetch_open_meteo_convective(32.7767, -96.7970)
+            self.assertIsInstance(res, dict)
+            self.assertEqual(res['temperature_c'], 24.5)
+            self.assertEqual(res['temperature_f'], 76.1)
+            self.assertEqual(res['wind_speed_mph'], 9.3)
+            self.assertEqual(res['freezing_level_ft'], 11811)
+            self.assertEqual(res['hail_survival_rating'], 'MODERATE')
+            self.assertGreaterEqual(res['hail_potential_index'], 40)
+            self.assertLessEqual(res['hail_potential_index'], 100)
+
+    def test_def17_fuzz_lsr_and_multi_sensor_non_float_attributes(self):
+        """DEF-17: Verify evaluate_hail_risk coerces string numbers and ignores garbage across all sensor types."""
+        alerts = [{'event': 'Severe Thunderstorm Warning', 'hail_size_in': '1.75'}]
+        reports = [
+            {'distance_miles': '3.5', 'hail_size_in': '1.75', 'age_hours': '0.8', 'is_mping': True},
+            {'distance_miles': 'invalid', 'hail_size_in': 'bad', 'age_hours': 'old'}  # Non-numeric garbage
+        ]
+        convective = {
+            'cape_j_kg': '2200',
+            'peak_cape_today': '2600',
+            'lifted_index': '-4.5',
+            'freezing_level_ft': '9200'
+        }
+        reg_warnings = [{
+            'event': 'Severe Thunderstorm Warning',
+            'distance_miles': '10.5',
+            'hail_size_in': '1.50',
+            'motion': {'eta_mins': '25'}
+        }]
+
+        assessment = evaluate_hail_risk(alerts, reports, convective, regional_warnings=reg_warnings)
+        self.assertIsInstance(assessment, dict)
+        self.assertGreaterEqual(assessment['score'], 70)
+        self.assertIn(assessment['level'], ['WARNING', 'EMERGENCY'])
+        self.assertEqual(assessment['max_hail_inches'], 1.75)
+        self.assertTrue(any("mPING" in r for r in assessment['reasons']))
+        self.assertTrue(any("3.5 mi" in r for r in assessment['reasons']))  # Formatting {dist:.1f} succeeded
+
+    def test_def18_national_hotspots_upstream_outage_null_response(self):
+        """DEF-18: Verify fetch_active_national_hotspots safely returns 4 fallback hotspots during feed outage."""
+        # 1. Direct core function test with None return value (outage)
+        with mock.patch('hail_core.http_get_json', return_value=None):
+            hotspots = fetch_active_national_hotspots()
+            self.assertIsInstance(hotspots, list)
+            self.assertEqual(len(hotspots), 4)
+            areas = [h['area'] for h in hotspots]
+            self.assertIn("Dallas / Fort Worth, TX", areas)
+            self.assertIn("Oklahoma City, OK", areas)
+            self.assertIn("Denver, CO", areas)
+            self.assertIn("Wichita, KS", areas)
+            for h in hotspots:
+                self.assertIn('latitude', h)
+                self.assertIn('longitude', h)
+                self.assertIn('event', h)
+                self.assertIn('hail_label', h)
+
+        # 2. Direct core function test with empty dict return value
+        with mock.patch('hail_core.http_get_json', return_value={}):
+            hotspots_empty = fetch_active_national_hotspots()
+            self.assertEqual(len(hotspots_empty), 4)
+
+    def test_def18_api_hotspots_outage_fallback_endpoint(self):
+        """DEF-18: Verify /api/hotspots HTTP endpoint returns HTTP 200 and fallback hotspots when NWS is down."""
+        with mock.patch('hail_core.http_get_json', return_value=None):
+            status, headers, content = self.get_url("/api/hotspots")
+            self.assertEqual(status, 200)
+            data = json.loads(content.decode('utf-8'))
+            self.assertIn('hotspots', data)
+            self.assertEqual(len(data['hotspots']), 4)
+            self.assertEqual(data['hotspots'][0]['area'], 'Dallas / Fort Worth, TX')
+
+    def test_def19_offline_determinism_socket_firewall(self):
+        """DEF-19: Strict transport-layer firewall ensuring zero live external network connections occur."""
+        orig_connect = socket.socket.connect
+        blocked_calls = []
+
+        def firewall_connect(s_self, address):
+            host = address[0] if isinstance(address, tuple) and len(address) > 0 else str(address)
+            # Allow loopback connections to the local integration test server
+            if host in ('127.0.0.1', 'localhost', '::1'):
+                return orig_connect(s_self, address)
+            blocked_calls.append(address)
+            raise AssertionError(f"CRITICAL: Unmocked live external network call attempted to {address}!")
+
+        with mock.patch.object(socket.socket, 'connect', firewall_connect):
+            # 1. Full multi-sensor assessment
+            assessment = perform_full_assessment(32.7767, -96.7970, radius_miles=45)
+            self.assertIn('assessment', assessment)
+            self.assertIn('score', assessment['assessment'])
+
+            # 2. Active regional warnings
+            warn_res = fetch_active_nws_warnings(lat=32.7767, lon=-96.7970)
+            self.assertIn('warnings', warn_res)
+
+            # 3. National hotspots
+            hotspots = fetch_active_national_hotspots()
+            self.assertIsInstance(hotspots, list)
+
+            # 4. SPC convective outlook
+            outlook = fetch_spc_day1_outlook()
+            self.assertIn('categorical', outlook)
+
+            # 5. RainViewer radar metadata
+            radar = fetch_rainviewer_radar()
+            self.assertIn('frames', radar)
+
+            # 6. Verify zero external socket calls were attempted
+            self.assertEqual(len(blocked_calls), 0, f"External network calls detected: {blocked_calls}")
+
+    def test_def19_offline_mock_coverage_completeness(self):
+        """DEF-19: Verify every external weather API endpoint has an explicit offline mock fixture."""
+        expected_endpoints = [
+            "https://api.weather.gov/alerts/active",
+            "https://mesonet.agron.iastate.edu/geojson/lsr.py?hours=168",
+            "https://mesonet.agron.iastate.edu/geojson/sbw.geojson",
+            "https://api.open-meteo.com/v1/forecast?latitude=32.7767&longitude=-96.7970",
+            "https://api.rainviewer.com/public/weather-maps.json",
+            "https://www.spc.noaa.gov/products/outlook/day1otlk_cat.lyr.geojson",
+            "https://www.spc.noaa.gov/products/outlook/day1otlk_hail.lyr.geojson",
+            "https://nominatim.openstreetmap.org/search?q=Dallas&format=json&limit=1",
+            "https://nominatim.openstreetmap.org/reverse?lat=32.7767&lon=-96.7970&format=json"
+        ]
+        for url in expected_endpoints:
+            with self.subTest(url=url):
+                req = urllib.request.Request(url)
+                resp = mock_urlopen(req)
+                self.assertEqual(resp.status, 200)
+                data = json.loads(resp.read().decode('utf-8'))
+                self.assertIsNotNone(data)
+
+    def test_expanded_ui_xss_and_csp_compliance(self):
+        """Verify static/app.js escapes radar tower icon, range rings, SPC tooltips, and has no inline onclick."""
+        with open(os.path.join(STATIC_DIR, 'app.js'), 'r', encoding='utf-8') as f:
+            js = f.read()
+
+        # 1. escapeHtml handles backticks
+        self.assertIn('.replace(/`/g, "&#96;")', js)
+
+        # 2. Radar tower beacon title escapes st.icao and st.name
+        self.assertIn('escapeHtml(st.icao)', js)
+        self.assertIn('escapeHtml(st.name)', js)
+
+        # 3. Radar range ring label escapes st.icao
+        self.assertIn('escapeHtml(st.icao)} ${escapeHtml(r.label)}', js)
+
+        # 4. SPC Outlook tooltip escapes p.LABEL and p.LABEL2
+        self.assertIn('escapeHtml(p.LABEL', js)
+        self.assertIn('escapeHtml(p.LABEL2', js)
+
+        # 5. Zero inline onclick handlers (CSP compliance)
+        self.assertNotIn('onclick=', js)
+
+    def test_server_route_empty_fallbacks(self):
+        """Verify route handlers handle core functions returning None, empty lists, or malformed query dicts."""
+        # 1. /api/hotspots when core returns None
+        with mock.patch('server.fetch_active_national_hotspots', return_value=None):
+            status, headers, content = self.get_url("/api/hotspots")
+            self.assertEqual(status, 200)
+            data = json.loads(content.decode())
+            self.assertIsInstance(data['hotspots'], list)
+            self.assertEqual(data['count'], 0)
+
+        # 2. /api/nws/warnings when core returns None
+        with mock.patch('server.fetch_active_nws_warnings', return_value=None):
+            status, headers, content = self.get_url("/api/nws/warnings")
+            self.assertEqual(status, 200)
+            data = json.loads(content.decode())
+            self.assertIsInstance(data['warnings'], list)
+            self.assertEqual(data['count'], 0)
+
+        # 3. /api/assess when core returns empty dict
+        with mock.patch('server.perform_full_assessment', return_value={}):
+            status, headers, content = self.get_url("/api/assess?lat=32.7&lon=-96.8")
+            self.assertEqual(status, 200)
+            data = json.loads(content.decode())
+            self.assertIn('assessment', data)
+            self.assertEqual(data['assessment']['level'], 'NONE')
+            self.assertIsInstance(data['nws_alerts'], list)
+
+        # 4. /api/search with malformed coordinates in upstream Nominatim item
+        bad_nominatim = [
+            {'display_name': 'Valid City', 'lat': '32.7767', 'lon': '-96.7970'},
+            {'display_name': 'Corrupt City', 'lat': None, 'lon': 'abc'},
+            {'display_name': 'Another Valid City', 'lat': '30.2672', 'lon': '-97.7431'}
+        ]
+        def custom_urlopen(req, *args, **kwargs):
+            url = req.full_url if hasattr(req, 'full_url') else str(req)
+            if f"127.0.0.1:{TEST_PORT}" in url or f"localhost:{TEST_PORT}" in url:
+                return _ORIG_URLOPEN(req, *args, **kwargs)
+            return MockResponse(json.dumps(bad_nominatim).encode())
+
+        with mock.patch('urllib.request.urlopen', side_effect=custom_urlopen):
+            status, headers, content = self.get_url("/api/search?q=Texas")
+            self.assertEqual(status, 200)
+            data = json.loads(content.decode())
+            self.assertEqual(len(data), 2)  # Corrupt city skipped, valid cities preserved
+
 
 if __name__ == '__main__':
     unittest.main()
+

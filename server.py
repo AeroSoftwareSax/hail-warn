@@ -9,6 +9,7 @@ import sys
 import os
 import json
 import math
+import time
 import urllib.parse
 import urllib.request
 import ssl
@@ -28,6 +29,13 @@ from hail_core import (
 )
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static')
+
+def get_query_param(query, key, default=None):
+    """Safely extract the first value from a parse_qs dictionary without IndexError."""
+    vals = query.get(key)
+    if isinstance(vals, list) and len(vals) > 0:
+        return vals[0]
+    return default
 
 def validate_coordinates(lat_raw, lon_raw):
     """Validate and return float (lat, lon) within bounds [-90, 90] and [-180, 180].
@@ -146,10 +154,10 @@ class HailWarnRequestHandler(SimpleHTTPRequestHandler):
         self.wfile.write(body)
 
     def handle_assess(self, query):
-        lat_param = query.get('lat', [None])[0]
-        lon_param = query.get('lon', [None])[0]
-        radius_param = query.get('radius', [None])[0]
-        hours_param = query.get('hours', [None])[0]
+        lat_param = get_query_param(query, 'lat')
+        lon_param = get_query_param(query, 'lon')
+        radius_param = get_query_param(query, 'radius')
+        hours_param = get_query_param(query, 'hours')
 
         try:
             lat, lon = validate_coordinates(lat_param, lon_param)
@@ -161,6 +169,36 @@ class HailWarnRequestHandler(SimpleHTTPRequestHandler):
 
         try:
             result = perform_full_assessment(lat, lon, radius_miles=radius, hours=hours)
+            if not isinstance(result, dict) or not result:
+                result = {}
+
+            # Guarantee mandatory schema fields
+            result.setdefault('timestamp', time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()))
+            result.setdefault('location', {'latitude': lat, 'longitude': lon, 'radius_miles': radius, 'hours': hours})
+            if not isinstance(result.get('assessment'), dict):
+                result['assessment'] = {
+                    'score': 0,
+                    'level': 'NONE',
+                    'badge_class': 'danger-none',
+                    'max_hail_inches': 0.0,
+                    'max_hail_label': 'None',
+                    'estimated_dbz': '< 30 dBZ (Light Rain / Clear)',
+                    'action_recommendation': 'NO ACTIVE HAIL THREAT: No severe hail signatures detected.',
+                    'reasons': ['Zero active radar hail signatures.']
+                }
+            if not isinstance(result.get('nws_alerts'), list):
+                result['nws_alerts'] = []
+            if not isinstance(result.get('lsr_reports'), list):
+                result['lsr_reports'] = []
+            if not isinstance(result.get('convective_data'), dict):
+                result['convective_data'] = {}
+            if not isinstance(result.get('radar_metadata'), dict):
+                result['radar_metadata'] = {'host': 'https://tilecache.rainviewer.com', 'frames': []}
+            if not isinstance(result.get('regional_warnings'), dict):
+                result['regional_warnings'] = {'warnings': [], 'geojson': {'type': 'FeatureCollection', 'features': []}, 'count': 0}
+            if not isinstance(result.get('spc_outlook'), dict):
+                result['spc_outlook'] = {'categorical': {'type': 'FeatureCollection', 'features': []}, 'hail': {'type': 'FeatureCollection', 'features': []}}
+
             self.send_json_response(result)
         except Exception as e:
             print(f"[Server Error] Assessment failed for {lat}, {lon}: {e}", file=sys.stderr)
@@ -171,16 +209,27 @@ class HailWarnRequestHandler(SimpleHTTPRequestHandler):
         lon = None
         radius = 250.0
         try:
-            if 'lat' in query and 'lon' in query:
-                lat, lon = validate_coordinates(query['lat'][0], query['lon'][0])
-            if 'radius' in query:
-                radius = validate_radius(query['radius'][0], default=250.0)
+            lat_raw = get_query_param(query, 'lat')
+            lon_raw = get_query_param(query, 'lon')
+            if lat_raw is not None and lon_raw is not None:
+                lat, lon = validate_coordinates(lat_raw, lon_raw)
+            radius_raw = get_query_param(query, 'radius')
+            if radius_raw is not None:
+                radius = validate_radius(radius_raw, default=250.0)
         except ValueError as e:
             self.send_json_response({'error': str(e)}, 400)
             return
 
         try:
             data = fetch_active_nws_warnings(lat=lat, lon=lon, radius_miles=radius)
+            if not isinstance(data, dict):
+                data = {'warnings': [], 'geojson': {'type': 'FeatureCollection', 'features': []}, 'count': 0}
+            else:
+                if not isinstance(data.get('warnings'), list):
+                    data['warnings'] = []
+                if not isinstance(data.get('geojson'), dict):
+                    data['geojson'] = {'type': 'FeatureCollection', 'features': []}
+                data['count'] = len(data['warnings'])
             self.send_json_response(data)
         except Exception as e:
             print(f"[Server Error] Active NWS warnings failed: {e}", file=sys.stderr)
@@ -189,6 +238,8 @@ class HailWarnRequestHandler(SimpleHTTPRequestHandler):
     def handle_spc_outlook(self):
         try:
             data = fetch_spc_day1_outlook()
+            if not isinstance(data, dict):
+                data = {'categorical': {'type': 'FeatureCollection', 'features': []}, 'hail': {'type': 'FeatureCollection', 'features': []}}
             self.send_json_response(data)
         except Exception as e:
             print(f"[Server Error] SPC outlook failed: {e}", file=sys.stderr)
@@ -197,14 +248,22 @@ class HailWarnRequestHandler(SimpleHTTPRequestHandler):
     def handle_hotspots(self):
         try:
             hotspots = fetch_active_national_hotspots()
-            self.send_json_response({'hotspots': hotspots})
+            if not isinstance(hotspots, list):
+                hotspots = []
+            safe_hotspots = []
+            for h in hotspots:
+                if isinstance(h, dict) and 'latitude' in h and 'longitude' in h:
+                    safe_hotspots.append(h)
+            self.send_json_response({'hotspots': safe_hotspots, 'count': len(safe_hotspots)})
         except Exception as e:
             print(f"[Server Error] Hotspots query failed: {e}", file=sys.stderr)
-            self.send_json_response({'hotspots': []})
+            self.send_json_response({'hotspots': [], 'count': 0})
 
     def handle_radar(self):
         try:
             radar = fetch_rainviewer_radar()
+            if not isinstance(radar, dict):
+                radar = {'host': 'https://tilecache.rainviewer.com', 'frames': []}
             self.send_json_response(radar)
         except Exception as e:
             print(f"[Server Error] Radar query failed: {e}", file=sys.stderr)
@@ -214,40 +273,69 @@ class HailWarnRequestHandler(SimpleHTTPRequestHandler):
         lat = None
         lon = None
         try:
-            if 'lat' in query and 'lon' in query:
-                lat, lon = validate_coordinates(query['lat'][0], query['lon'][0])
+            lat_raw = get_query_param(query, 'lat')
+            lon_raw = get_query_param(query, 'lon')
+            if lat_raw is not None and lon_raw is not None:
+                lat, lon = validate_coordinates(lat_raw, lon_raw)
         except ValueError as e:
             self.send_json_response({'error': str(e)}, 400)
             return
 
-        stations = load_nexrad_stations()
-        nearest = find_nearest_nexrad(lat, lon) if lat is not None and lon is not None else None
-        self.send_json_response({
-            'stations': stations,
-            'nearest': nearest,
-            'count': len(stations)
-        })
+        try:
+            stations = load_nexrad_stations()
+            if not isinstance(stations, list):
+                stations = []
+            nearest = find_nearest_nexrad(lat, lon) if lat is not None and lon is not None else None
+            self.send_json_response({
+                'stations': stations,
+                'nearest': nearest,
+                'count': len(stations)
+            })
+        except Exception as e:
+            print(f"[Server Error] NEXRAD stations lookup failed: {e}", file=sys.stderr)
+            self.send_json_response({'stations': [], 'nearest': None, 'count': 0})
 
     def handle_search(self, query):
-        q = query.get('q', [''])[0].strip()
+        q_raw = get_query_param(query, 'q', '')
+        q = str(q_raw).strip()
         if not q:
             self.send_json_response([])
             return
+
+        if len(q) > 200:
+            q = q[:200]
 
         enc_q = urllib.parse.quote(q)
         url = f"https://nominatim.openstreetmap.org/search?q={enc_q}&format=json&limit=5&addressdetails=1"
         req = urllib.request.Request(url, headers={'User-Agent': USER_AGENT})
         try:
             with urllib.request.urlopen(req, timeout=6, context=SSL_CTX) as resp:  # nosec B310
-                data = json.loads(resp.read().decode('utf-8'))
+                raw_data = resp.read().decode('utf-8')
+                data = json.loads(raw_data)
+                if not isinstance(data, list):
+                    self.send_json_response([])
+                    return
+
                 results = []
                 for item in data:
+                    if not isinstance(item, dict):
+                        continue
+                    try:
+                        lat_val = float(item.get('lat'))
+                        lon_val = float(item.get('lon'))
+                    except (TypeError, ValueError):
+                        continue
+                    if math.isnan(lat_val) or math.isinf(lat_val) or not (-90.0 <= lat_val <= 90.0):
+                        continue
+                    if math.isnan(lon_val) or math.isinf(lon_val) or not (-180.0 <= lon_val <= 180.0):
+                        continue
+
                     results.append({
-                        'display_name': item.get('display_name'),
-                        'lat': float(item.get('lat')),
-                        'lon': float(item.get('lon')),
-                        'type': item.get('type'),
-                        'importance': item.get('importance')
+                        'display_name': str(item.get('display_name') or f"{lat_val:.3f}, {lon_val:.3f}"),
+                        'lat': lat_val,
+                        'lon': lon_val,
+                        'type': str(item.get('type') or ''),
+                        'importance': float(item.get('importance') or 0.0) if isinstance(item.get('importance'), (int, float)) else 0.0
                     })
                 self.send_json_response(results)
         except urllib.error.HTTPError as e:
@@ -259,8 +347,8 @@ class HailWarnRequestHandler(SimpleHTTPRequestHandler):
             self.send_json_response([])
 
     def handle_reverse_geocode(self, query):
-        lat_param = query.get('lat', [None])[0]
-        lon_param = query.get('lon', [None])[0]
+        lat_param = get_query_param(query, 'lat')
+        lon_param = get_query_param(query, 'lon')
         try:
             lat, lon = validate_coordinates(lat_param, lon_param)
         except ValueError:

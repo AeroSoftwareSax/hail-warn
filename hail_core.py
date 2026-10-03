@@ -124,20 +124,51 @@ HAIL_SIZE_DESCRIPTIONS = [
     (4.50, "Softball Size (4.50 in) - Catastrophic")
 ]
 
+def _safe_float(val, default=0.0):
+    """Safely convert any value to float with fallback, rejecting NaN/Inf."""
+    if val is None:
+        return default
+    try:
+        f = float(val)
+        return default if (math.isnan(f) or math.isinf(f)) else f
+    except (ValueError, TypeError):
+        return default
+
+def _safe_float_list(raw_list, default_val=0.0):
+    """Extract list of finite floats from raw iterable, skipping malformed elements."""
+    if not isinstance(raw_list, (list, tuple)):
+        return [default_val]
+    parsed = []
+    for item in raw_list:
+        try:
+            f = float(item)
+            if not (math.isnan(f) or math.isinf(f)):
+                parsed.append(f)
+        except (ValueError, TypeError):
+            continue
+    return parsed or [default_val]
+
 def describe_hail_size(inches):
     """Returns human-readable descriptive name for a hail diameter in inches."""
-    if not inches or inches <= 0:
+    try:
+        val = float(inches)
+    except (ValueError, TypeError):
         return "None"
+
+    if math.isnan(val) or math.isinf(val) or val <= 0:
+        return "None"
+
     closest = None
     min_diff = 999.0
     for size, label in HAIL_SIZE_DESCRIPTIONS:
-        diff = abs(size - inches)
+        diff = abs(size - val)
         if diff < min_diff:
             min_diff = diff
             closest = label
-    if inches >= 4.5:
-        return f"Softball+ ({inches:.2f} in) - Catastrophic"
-    return closest or f"{inches:.2f} in"
+    if val >= 4.5:
+        return f"Softball+ ({val:.2f} in) - Catastrophic"
+    return closest or f"{val:.2f} in"
+
 
 def haversine_distance(lat1, lon1, lat2, lon2):
     """Calculate the great circle distance in miles between two coordinates."""
@@ -180,41 +211,55 @@ def fetch_nws_point_alerts(lat, lon):
     Free, no API key required.
     """
     url = f"https://api.weather.gov/alerts/active?point={lat:.4f},{lon:.4f}"
-    data = http_get_json(url)
-    if not data or 'features' not in data:
+    data = http_get_json(url) or {}
+    raw_features = data.get('features')
+    if not isinstance(raw_features, list):
         return []
 
     alerts = []
-    for f in data.get('features', []):
+    for f in raw_features:
         if not isinstance(f, dict):
             continue
-        props = f.get('properties') or {}
-        geom = f.get('geometry')
+        props = f.get('properties') if isinstance(f.get('properties'), dict) else {}
+        geom = f.get('geometry') if isinstance(f.get('geometry'), dict) else None
         event = props.get('event') or ''
+        if not event:
+            continue
         severity = props.get('severity') or ''
         headline = props.get('headline') or ''
         description = props.get('description') or ''
         instruction = props.get('instruction') or ''
-        parameters = props.get('parameters') or {}
+        parameters = props.get('parameters') if isinstance(props.get('parameters'), dict) else {}
         hail_tags = parameters.get('maxHailSize') or []
         hail_threat = parameters.get('hailThreat') or []
 
         # Extract hail size from parameters or regex in description
         hail_size = None
-        if hail_tags:
+        if isinstance(hail_tags, list) and hail_tags:
             try:
                 hail_size = float(hail_tags[0])
             except (ValueError, TypeError):
                 pass
-        
-        if hail_size is None and description:
+        elif isinstance(hail_tags, (int, float, str)):
+            try:
+                hail_size = float(hail_tags)
+            except (ValueError, TypeError):
+                pass
+
+        if hail_size is None and description and isinstance(description, str):
             # Look for patterns like "HAIL...1.75 INCHES" or "hail up to quarter size"
             match = re.search(r'HAIL(?:\s+THREAT)?\.\.\.([0-9\.]+)\s*(?:IN|INCHES)?', description, re.IGNORECASE)
             if match:
                 try:
                     hail_size = float(match.group(1))
-                except ValueError:
+                except (ValueError, TypeError):
                     pass
+
+        threat_type = 'RADAR INDICATED'
+        if isinstance(hail_threat, list) and hail_threat and hail_threat[0]:
+            threat_type = str(hail_threat[0])
+        elif isinstance(hail_threat, str) and hail_threat:
+            threat_type = hail_threat
 
         alerts.append({
             'id': props.get('id'),
@@ -227,11 +272,11 @@ def fetch_nws_point_alerts(lat, lon):
             'instruction': instruction,
             'hail_size_in': hail_size,
             'hail_description': describe_hail_size(hail_size) if hail_size else None,
-            'hail_threat_type': hail_threat[0] if hail_threat else 'RADAR INDICATED',
+            'hail_threat_type': threat_type,
             'effective': props.get('effective'),
             'expires': props.get('expires'),
             'geometry': geom,
-            'is_severe_hail': (hail_size is not None and hail_size >= 1.0) or ('Severe Thunderstorm' in event and 'hail' in description.lower())
+            'is_severe_hail': (hail_size is not None and hail_size >= 1.0) or ('Severe Thunderstorm' in event and isinstance(description, str) and 'hail' in description.lower())
         })
     return alerts
 
@@ -366,18 +411,18 @@ def fetch_open_meteo_convective(lat, lon):
     current = data.get('current') if isinstance(data.get('current'), dict) else {}
     hourly = data.get('hourly') if isinstance(data.get('hourly'), dict) else {}
 
-    capes = [v for v in (hourly.get('cape') or [0]) if v is not None]
-    lifted_indices = [v for v in (hourly.get('lifted_index') or [0]) if v is not None]
-    cins = [v for v in (hourly.get('convective_inhibition') or [0]) if v is not None]
-    raw_fz = [v for v in (hourly.get('freezing_level_height') or []) if v is not None and v > 0]
-    freezing_lvl_m = raw_fz[0] if raw_fz else 3500
+    capes = _safe_float_list(hourly.get('cape'), 0.0)
+    lifted_indices = _safe_float_list(hourly.get('lifted_index'), 0.0)
+    cins = _safe_float_list(hourly.get('convective_inhibition'), 0.0)
+    raw_fz = [v for v in _safe_float_list(hourly.get('freezing_level_height'), 0.0) if v > 0]
+    freezing_lvl_m = raw_fz[0] if raw_fz else 3500.0
     freezing_lvl_ft = round(freezing_lvl_m * 3.28084)
 
-    cape_val = capes[0] if capes else 0
-    li_val = lifted_indices[0] if lifted_indices else 0
-    max_cape = max(capes) if capes else 0
-    min_li = min(lifted_indices) if lifted_indices else 0
-    cin_val = abs(cins[0]) if cins else 0
+    cape_val = capes[0] if capes else 0.0
+    li_val = lifted_indices[0] if lifted_indices else 0.0
+    max_cape = max(capes) if capes else 0.0
+    min_li = min(lifted_indices) if lifted_indices else 0.0
+    cin_val = abs(cins[0]) if cins else 0.0
 
     # Convective Inhibition (Cap) Classification
     if cin_val < 25:
@@ -408,13 +453,18 @@ def fetch_open_meteo_convective(lat, lon):
     fz_pts = 20 if freezing_lvl_ft <= 9500 else (12 if freezing_lvl_ft <= 12500 else 5)
     hpi_score = int(min(100, round(cape_pts + li_pts + fz_pts)))
 
-    temp_c = current.get('temperature_2m', 20)
-    temp_f = round((temp_c * 9/5) + 32, 1) if temp_c is not None else None
-    wind_kmh = current.get('wind_speed_10m', 0) or 0
+    raw_temp = current.get('temperature_2m', 20)
+    if raw_temp is not None:
+        temp_c = _safe_float(raw_temp, 20.0)
+        temp_f = round((temp_c * 9/5) + 32, 1)
+    else:
+        temp_c = None
+        temp_f = None
+    wind_kmh = _safe_float(current.get('wind_speed_10m'), 0.0)
     wind_mph = round(wind_kmh * 0.621371, 1)
-    gusts_kmh = current.get('wind_gusts_10m', 0) or 0
+    gusts_kmh = _safe_float(current.get('wind_gusts_10m'), 0.0)
     gusts_mph = round(gusts_kmh * 0.621371, 1)
-    surf_press = current.get('surface_pressure', 1013.25) or 1013.25
+    surf_press = _safe_float(current.get('surface_pressure'), 1013.25)
     surf_press_inhg = round(surf_press * 0.02953, 2)
 
     return {
@@ -490,305 +540,358 @@ def fetch_active_nws_warnings(lat=None, lon=None, radius_miles=250):
     seen_ids = set()
 
     # 1. Process NWS Features
-    for f in nws_data.get('features', []):
-        props = f.get('properties', {})
-        geom = f.get('geometry')
-        event = props.get('event', '')
-        if not event or not geom:
-            continue
+    nws_features = nws_data.get('features')
+    if isinstance(nws_features, list):
+        for f in nws_features:
+            if not isinstance(f, dict):
+                continue
+            props = f.get('properties') if isinstance(f.get('properties'), dict) else {}
+            geom = f.get('geometry') if isinstance(f.get('geometry'), dict) else None
+            event = props.get('event', '')
+            if not event or not geom:
+                continue
 
-        is_severe = any(k in event for k in [
-            'Severe Thunderstorm', 'Tornado', 'Flash Flood', 'Special Weather',
-            'Severe Weather', 'Flood', 'Watch', 'Advisory', 'High Wind'
-        ])
-        if not is_severe:
-            continue
+            is_severe = any(k in event for k in [
+                'Severe Thunderstorm', 'Tornado', 'Flash Flood', 'Special Weather',
+                'Severe Weather', 'Flood', 'Watch', 'Advisory', 'High Wind'
+            ])
+            if not is_severe:
+                continue
 
-        alert_id = props.get('id') or f.get('id')
-        if alert_id in seen_ids:
-            continue
-        seen_ids.add(alert_id)
+            alert_id = props.get('id') or f.get('id')
+            if alert_id in seen_ids:
+                continue
+            seen_ids.add(alert_id)
 
-        params = props.get('parameters') or {}
-        hail_tags = params.get('maxHailSize') or []
-        wind_tags = params.get('maxWindGust') or []
-        motion_tags = params.get('eventMotionDescription') or []
-        hail_threat = params.get('hailThreat') or ['RADAR INDICATED']
-        wind_threat = params.get('windThreat') or ['RADAR INDICATED']
-        tornado_det = params.get('tornadoDetection') or ['']
+            params = props.get('parameters') if isinstance(props.get('parameters'), dict) else {}
+            hail_tags = params.get('maxHailSize') or []
+            wind_tags = params.get('maxWindGust') or []
+            motion_tags = params.get('eventMotionDescription') or []
+            hail_threat = params.get('hailThreat') or ['RADAR INDICATED']
+            wind_threat = params.get('windThreat') or ['RADAR INDICATED']
+            tornado_det = params.get('tornadoDetection') or ['']
 
-        hail_size = None
-        if hail_tags:
-            try:
-                hail_size = float(hail_tags[0])
-            except (ValueError, TypeError):
-                pass
-        
-        description = props.get('description', '') or ''
-        headline = props.get('headline', '') or ''
-        instruction = props.get('instruction', '') or ''
-
-        if hail_size is None and description:
-            m = re.search(r'HAIL(?:\s+THREAT)?\.\.\.([0-9\.]+)\s*(?:IN|INCHES)?', description, re.IGNORECASE)
-            if m:
+            hail_size = None
+            if isinstance(hail_tags, list) and hail_tags:
                 try:
-                    hail_size = float(m.group(1))
-                except ValueError:
+                    hail_size = float(hail_tags[0])
+                except (ValueError, TypeError):
                     pass
+            elif isinstance(hail_tags, (int, float, str)):
+                try:
+                    hail_size = float(hail_tags)
+                except (ValueError, TypeError):
+                    pass
+            
+            description = props.get('description', '') or ''
+            headline = props.get('headline', '') or ''
+            instruction = props.get('instruction', '') or ''
 
-        # Calculate centroid & distance
-        center_lat, center_lon = None, None
-        coords = geom.get('coordinates', [])
-        pts = []
-        try:
-            if geom.get('type') == 'Polygon':
-                pts = coords[0]
-            elif geom.get('type') == 'MultiPolygon':
-                pts = coords[0][0]
-            if pts:
-                center_lon = sum(p[0] for p in pts) / len(pts)
-                center_lat = sum(p[1] for p in pts) / len(pts)
-        except Exception:
-            pass
+            if hail_size is None and description and isinstance(description, str):
+                m = re.search(r'HAIL(?:\s+THREAT)?\.\.\.([0-9\.]+)\s*(?:IN|INCHES)?', description, re.IGNORECASE)
+                if m:
+                    try:
+                        hail_size = float(m.group(1))
+                    except (ValueError, TypeError):
+                        pass
 
-        dist_mi = None
-        if lat is not None and lon is not None and center_lat is not None:
-            dist_mi = round(haversine_distance(lat, lon, center_lat, center_lon), 1)
+            # Calculate centroid & distance
+            center_lat, center_lon = None, None
+            coords = geom.get('coordinates', []) if isinstance(geom.get('coordinates'), list) else []
+            pts = []
+            try:
+                if geom.get('type') == 'Polygon' and coords:
+                    pts = coords[0]
+                elif geom.get('type') == 'MultiPolygon' and coords and coords[0]:
+                    pts = coords[0][0]
+                if pts:
+                    center_lon = sum(p[0] for p in pts) / len(pts)
+                    center_lat = sum(p[1] for p in pts) / len(pts)
+            except Exception:
+                pass
 
-        # Parse storm motion vector
-        motion_obj = None
-        if motion_tags:
-            m_str = motion_tags[0]
-            m_match = re.search(r'(\d+)DEG\.\.\.(\d+)KT\.\.\.([\d\.\-]+),([\d\.\-]+)', m_str)
-            if m_match:
-                deg = int(m_match.group(1))
-                kt = int(m_match.group(2))
-                mph = round(kt * 1.15078, 1)
-                slat = float(m_match.group(3))
-                slon = float(m_match.group(4))
-                
-                eta_mins = None
-                if lat is not None and lon is not None:
-                    d_lat = lat - slat
-                    d_lon = (lon - slon) * math.cos(math.radians(slat))
-                    bearing_to_user = (math.degrees(math.atan2(d_lon, d_lat)) + 360) % 360
-                    angle_diff = abs((deg - bearing_to_user + 180) % 360 - 180)
-                    if angle_diff < 50:
-                        closing_speed = mph * math.cos(math.radians(angle_diff))
-                        if closing_speed > 3.0 and dist_mi and dist_mi > 0:
-                            eta_mins = int(round((dist_mi / closing_speed) * 60))
+            dist_mi = None
+            if lat is not None and lon is not None and center_lat is not None:
+                dist_mi = round(haversine_distance(lat, lon, center_lat, center_lon), 1)
 
-                # Project forward trajectory (15, 30, 45 mins)
-                proj = []
-                for mins in [15, 30, 45]:
-                    d_dist = (mph * (mins / 60.0)) / 69.0
-                    rad = math.radians(deg)
-                    plat = slat + d_dist * math.cos(rad)
-                    cos_lat = math.cos(math.radians(slat))
-                    if abs(cos_lat) < 1e-6:
-                        cos_lat = 1e-6 if cos_lat >= 0 else -1e-6
-                    plon = slon + (d_dist / cos_lat) * math.sin(rad)
-                    proj.append({'minutes': mins, 'lat': round(plat, 4), 'lon': round(plon, 4)})
+            # Parse storm motion vector
+            motion_obj = None
+            m_str = None
+            if isinstance(motion_tags, list) and motion_tags:
+                cand = motion_tags[0]
+                if isinstance(cand, str):
+                    m_str = cand
+            elif isinstance(motion_tags, str):
+                m_str = motion_tags
 
-                motion_obj = {
-                    'heading_deg': deg,
-                    'speed_kt': kt,
-                    'speed_mph': mph,
-                    'storm_lat': slat,
-                    'storm_lon': slon,
-                    'eta_mins': eta_mins,
-                    'projected_path': proj
-                }
+            if m_str:
+                m_match = re.search(r'(\d+)DEG\.\.\.(\d+)KT\.\.\.([\d\.\-]+),([\d\.\-]+)', m_str)
+                if m_match:
+                    try:
+                        deg = int(m_match.group(1))
+                        kt = int(m_match.group(2))
+                        mph = round(kt * 1.15078, 1)
+                        slat = float(m_match.group(3))
+                        slon = float(m_match.group(4))
+                        
+                        eta_mins = None
+                        if lat is not None and lon is not None:
+                            d_lat = lat - slat
+                            d_lon = (lon - slon) * math.cos(math.radians(slat))
+                            bearing_to_user = (math.degrees(math.atan2(d_lon, d_lat)) + 360) % 360
+                            angle_diff = abs((deg - bearing_to_user + 180) % 360 - 180)
+                            if angle_diff < 50:
+                                closing_speed = mph * math.cos(math.radians(angle_diff))
+                                if closing_speed > 3.0 and dist_mi and dist_mi > 0:
+                                    eta_mins = int(round((dist_mi / closing_speed) * 60))
 
-        is_tornado = 'Tornado' in event
-        is_severe_tstorm = 'Severe Thunderstorm' in event
-        is_flash_flood = 'Flash Flood' in event or 'Flood' in event
-        is_special = 'Special Weather' in event or 'Statement' in event
-        is_watch = 'Watch' in event
-        is_destructive = (is_severe_tstorm and ((hail_size and hail_size >= 2.0) or (wind_tags and '80' in wind_tags[0]))) or is_tornado
+                        # Project forward trajectory (15, 30, 45 mins)
+                        proj = []
+                        for mins in [15, 30, 45]:
+                            d_dist = (mph * (mins / 60.0)) / 69.0
+                            rad = math.radians(deg)
+                            plat = slat + d_dist * math.cos(rad)
+                            cos_lat = math.cos(math.radians(slat))
+                            if abs(cos_lat) < 1e-6:
+                                cos_lat = 1e-6 if cos_lat >= 0 else -1e-6
+                            plon = slon + (d_dist / cos_lat) * math.sin(rad)
+                            proj.append({'minutes': mins, 'lat': round(plat, 4), 'lon': round(plon, 4)})
 
-        if is_tornado:
-            color = "#ef4444"
-            cat = "TORNADO"
-            weight = 3.5
-            dash = None
-            pulse = True
-        elif is_destructive:
-            color = "#ec4899"
-            cat = "DESTRUCTIVE_HAIL"
-            weight = 3.0
-            dash = None
-            pulse = True
-        elif is_severe_tstorm:
-            color = "#f59e0b"
-            cat = "SEVERE_TSTORM"
-            weight = 2.5
-            dash = None
-            pulse = False
-        elif is_flash_flood:
-            color = "#06b6d4"
-            cat = "FLASH_FLOOD"
-            weight = 2.5
-            dash = None
-            pulse = False
-        elif is_special:
-            color = "#38bdf8"
-            cat = "ADVISORY"
-            weight = 2.0
-            dash = "6, 6"
-            pulse = False
-        elif is_watch:
-            color = "#eab308"
-            cat = "WATCH"
-            weight = 2.0
-            dash = "4, 4"
-            pulse = False
-        else:
-            color = "#64748b"
-            cat = "WEATHER"
-            weight = 1.5
-            dash = None
-            pulse = False
+                        motion_obj = {
+                            'heading_deg': deg,
+                            'speed_kt': kt,
+                            'speed_mph': mph,
+                            'storm_lat': slat,
+                            'storm_lon': slon,
+                            'eta_mins': eta_mins,
+                            'projected_path': proj
+                        }
+                    except Exception:
+                        pass
 
-        warnings.append({
-            'id': alert_id,
-            'event': event,
-            'category': cat,
-            'severity': props.get('severity', 'Severe'),
-            'urgency': props.get('urgency', 'Immediate'),
-            'headline': headline,
-            'description': description,
-            'instruction': instruction,
-            'hail_size_in': hail_size,
-            'hail_label': describe_hail_size(hail_size) if hail_size else None,
-            'hail_threat_type': hail_threat[0] if hail_threat else 'RADAR INDICATED',
-            'wind_gust': wind_tags[0] if wind_tags else None,
-            'wind_threat_type': wind_threat[0] if wind_threat else 'RADAR INDICATED',
-            'tornado_detection': tornado_det[0] if tornado_det else None,
-            'effective': props.get('effective'),
-            'expires': props.get('expires'),
-            'wfo': props.get('senderName', 'NWS'),
-            'area_desc': props.get('areaDesc', ''),
-            'center_lat': center_lat,
-            'center_lon': center_lon,
-            'distance_miles': dist_mi,
-            'motion': motion_obj,
-            'style': {
-                'color': color,
-                'fillColor': color,
-                'weight': weight,
-                'dashArray': dash,
-                'pulse': pulse,
-                'fillOpacity': 0.22
-            },
-            'geometry': geom
-        })
+            wind_first = None
+            if isinstance(wind_tags, list) and wind_tags:
+                wind_first = wind_tags[0]
+            elif isinstance(wind_tags, (str, int, float)):
+                wind_first = wind_tags
+
+            has_80_wind = False
+            if isinstance(wind_first, str):
+                has_80_wind = ('80' in wind_first)
+            elif isinstance(wind_first, (int, float)):
+                has_80_wind = (wind_first >= 80)
+
+            is_tornado = 'Tornado' in event
+            is_severe_tstorm = 'Severe Thunderstorm' in event
+            is_flash_flood = 'Flash Flood' in event or 'Flood' in event
+            is_special = 'Special Weather' in event or 'Statement' in event
+            is_watch = 'Watch' in event
+            is_destructive = (is_severe_tstorm and ((hail_size and hail_size >= 2.0) or has_80_wind)) or is_tornado
+
+            if is_tornado:
+                color = "#ef4444"
+                cat = "TORNADO"
+                weight = 3.5
+                dash = None
+                pulse = True
+            elif is_destructive:
+                color = "#ec4899"
+                cat = "DESTRUCTIVE_HAIL"
+                weight = 3.0
+                dash = None
+                pulse = True
+            elif is_severe_tstorm:
+                color = "#f59e0b"
+                cat = "SEVERE_TSTORM"
+                weight = 2.5
+                dash = None
+                pulse = False
+            elif is_flash_flood:
+                color = "#06b6d4"
+                cat = "FLASH_FLOOD"
+                weight = 2.5
+                dash = None
+                pulse = False
+            elif is_special:
+                color = "#38bdf8"
+                cat = "ADVISORY"
+                weight = 2.0
+                dash = "6, 6"
+                pulse = False
+            elif is_watch:
+                color = "#eab308"
+                cat = "WATCH"
+                weight = 2.0
+                dash = "4, 4"
+                pulse = False
+            else:
+                color = "#64748b"
+                cat = "WEATHER"
+                weight = 1.5
+                dash = None
+                pulse = False
+
+            hail_threat_label = 'RADAR INDICATED'
+            if isinstance(hail_threat, list) and hail_threat and hail_threat[0]:
+                hail_threat_label = str(hail_threat[0])
+            elif isinstance(hail_threat, str) and hail_threat:
+                hail_threat_label = hail_threat
+
+            wind_threat_label = 'RADAR INDICATED'
+            if isinstance(wind_threat, list) and wind_threat and wind_threat[0]:
+                wind_threat_label = str(wind_threat[0])
+            elif isinstance(wind_threat, str) and wind_threat:
+                wind_threat_label = wind_threat
+
+            tornado_det_val = None
+            if isinstance(tornado_det, list) and tornado_det and tornado_det[0]:
+                tornado_det_val = str(tornado_det[0])
+            elif isinstance(tornado_det, str) and tornado_det:
+                tornado_det_val = tornado_det
+
+            warnings.append({
+                'id': alert_id,
+                'event': event,
+                'category': cat,
+                'severity': props.get('severity', 'Severe'),
+                'urgency': props.get('urgency', 'Immediate'),
+                'headline': headline,
+                'description': description,
+                'instruction': instruction,
+                'hail_size_in': hail_size,
+                'hail_label': describe_hail_size(hail_size) if hail_size else None,
+                'hail_threat_type': hail_threat_label,
+                'wind_gust': wind_first,
+                'wind_threat_type': wind_threat_label,
+                'tornado_detection': tornado_det_val,
+                'effective': props.get('effective'),
+                'expires': props.get('expires'),
+                'wfo': props.get('senderName', 'NWS'),
+                'area_desc': props.get('areaDesc', ''),
+                'center_lat': center_lat,
+                'center_lon': center_lon,
+                'distance_miles': dist_mi,
+                'motion': motion_obj,
+                'style': {
+                    'color': color,
+                    'fillColor': color,
+                    'weight': weight,
+                    'dashArray': dash,
+                    'pulse': pulse,
+                    'fillOpacity': 0.22
+                },
+                'geometry': geom
+            })
 
     # 2. Process IEM SBW Features
-    for f in iem_data.get('features', []):
-        props = f.get('properties', {})
-        geom = f.get('geometry')
-        event = props.get('ps', '')
-        if not event or not geom:
-            continue
+    iem_features = iem_data.get('features')
+    if isinstance(iem_features, list):
+        for f in iem_features:
+            if not isinstance(f, dict):
+                continue
+            props = f.get('properties') if isinstance(f.get('properties'), dict) else {}
+            geom = f.get('geometry') if isinstance(f.get('geometry'), dict) else None
+            event = props.get('ps', '')
+            if not event or not geom:
+                continue
 
-        iem_id = f"{props.get('wfo')}_{props.get('phenomena')}_{props.get('eventid')}_{props.get('year')}"
-        if iem_id in seen_ids:
-            continue
-        seen_ids.add(iem_id)
+            iem_id = f"{props.get('wfo')}_{props.get('phenomena')}_{props.get('eventid')}_{props.get('year')}"
+            if iem_id in seen_ids:
+                continue
+            seen_ids.add(iem_id)
 
-        hail_f = None
-        if props.get('hailtag') or props.get('max_hailtag'):
+            hail_f = None
+            if props.get('hailtag') or props.get('max_hailtag'):
+                try:
+                    hail_f = float(props.get('max_hailtag') or props.get('hailtag'))
+                except (ValueError, TypeError):
+                    pass
+
+            wind_tag = props.get('max_windtag') or props.get('windtag')
+            wind_str = f"{wind_tag} MPH" if wind_tag else None
+
+            center_lat, center_lon = None, None
+            coords = geom.get('coordinates', []) if isinstance(geom.get('coordinates'), list) else []
+            pts = []
             try:
-                hail_f = float(props.get('max_hailtag') or props.get('hailtag'))
-            except (ValueError, TypeError):
+                if geom.get('type') == 'Polygon' and coords:
+                    pts = coords[0]
+                elif geom.get('type') == 'MultiPolygon' and coords and coords[0]:
+                    pts = coords[0][0]
+                if pts:
+                    center_lon = sum(p[0] for p in pts) / len(pts)
+                    center_lat = sum(p[1] for p in pts) / len(pts)
+            except Exception:
                 pass
 
-        wind_tag = props.get('max_windtag') or props.get('windtag')
-        wind_str = f"{wind_tag} MPH" if wind_tag else None
+            dist_mi = None
+            if lat is not None and lon is not None and center_lat is not None:
+                dist_mi = round(haversine_distance(lat, lon, center_lat, center_lon), 1)
 
-        center_lat, center_lon = None, None
-        coords = geom.get('coordinates', [])
-        pts = []
-        try:
-            if geom.get('type') == 'Polygon':
-                pts = coords[0]
-            elif geom.get('type') == 'MultiPolygon':
-                pts = coords[0][0]
-            if pts:
-                center_lon = sum(p[0] for p in pts) / len(pts)
-                center_lat = sum(p[1] for p in pts) / len(pts)
-        except Exception:
-            pass
+            is_tornado = 'Tornado' in event or props.get('phenomena') == 'TO'
+            is_severe_tstorm = 'Severe Thunderstorm' in event or props.get('phenomena') == 'SV'
+            is_flash_flood = 'Flash Flood' in event or props.get('phenomena') == 'FF'
+            is_destructive = props.get('is_emergency') or props.get('is_pds') or (hail_f and hail_f >= 2.0)
 
-        dist_mi = None
-        if lat is not None and lon is not None and center_lat is not None:
-            dist_mi = round(haversine_distance(lat, lon, center_lat, center_lon), 1)
+            if is_tornado:
+                color = "#ef4444"
+                cat = "TORNADO"
+                weight = 3.5
+                pulse = True
+            elif is_destructive:
+                color = "#ec4899"
+                cat = "DESTRUCTIVE_HAIL"
+                weight = 3.0
+                pulse = True
+            elif is_severe_tstorm:
+                color = "#f59e0b"
+                cat = "SEVERE_TSTORM"
+                weight = 2.5
+                pulse = False
+            elif is_flash_flood:
+                color = "#06b6d4"
+                cat = "FLASH_FLOOD"
+                weight = 2.5
+                pulse = False
+            else:
+                color = "#38bdf8"
+                cat = "ADVISORY"
+                weight = 2.0
+                pulse = False
 
-        is_tornado = 'Tornado' in event or props.get('phenomena') == 'TO'
-        is_severe_tstorm = 'Severe Thunderstorm' in event or props.get('phenomena') == 'SV'
-        is_flash_flood = 'Flash Flood' in event or props.get('phenomena') == 'FF'
-        is_destructive = props.get('is_emergency') or props.get('is_pds') or (hail_f and hail_f >= 2.0)
-
-        if is_tornado:
-            color = "#ef4444"
-            cat = "TORNADO"
-            weight = 3.5
-            pulse = True
-        elif is_destructive:
-            color = "#ec4899"
-            cat = "DESTRUCTIVE_HAIL"
-            weight = 3.0
-            pulse = True
-        elif is_severe_tstorm:
-            color = "#f59e0b"
-            cat = "SEVERE_TSTORM"
-            weight = 2.5
-            pulse = False
-        elif is_flash_flood:
-            color = "#06b6d4"
-            cat = "FLASH_FLOOD"
-            weight = 2.5
-            pulse = False
-        else:
-            color = "#38bdf8"
-            cat = "ADVISORY"
-            weight = 2.0
-            pulse = False
-
-        warnings.append({
-            'id': iem_id,
-            'event': event,
-            'category': cat,
-            'severity': 'Extreme' if is_tornado else 'Severe',
-            'urgency': 'Immediate',
-            'headline': f"{event} for {props.get('wfo')} area",
-            'description': f"NWS {props.get('wfo')} issued a {event}. Hail: {hail_f or 'N/A'}\", Wind: {wind_str or 'N/A'}.",
-            'instruction': "Take protective shelter immediately. Protect vehicles from severe hail damage.",
-            'hail_size_in': hail_f,
-            'hail_label': describe_hail_size(hail_f) if hail_f else None,
-            'hail_threat_type': props.get('hailthreat') or 'RADAR INDICATED',
-            'wind_gust': wind_str,
-            'wind_threat_type': props.get('windthreat') or 'RADAR INDICATED',
-            'tornado_detection': props.get('tornadotag'),
-            'effective': props.get('polygon_begin'),
-            'expires': props.get('expire'),
-            'wfo': f"NWS {props.get('wfo')}",
-            'area_desc': props.get('wfo', 'Active Zone'),
-            'center_lat': center_lat,
-            'center_lon': center_lon,
-            'distance_miles': dist_mi,
-            'motion': None,
-            'style': {
-                'color': color,
-                'fillColor': color,
-                'weight': weight,
-                'dashArray': None,
-                'pulse': pulse,
-                'fillOpacity': 0.22
-            },
-            'geometry': geom
-        })
+            warnings.append({
+                'id': iem_id,
+                'event': event,
+                'category': cat,
+                'severity': 'Extreme' if is_tornado else 'Severe',
+                'urgency': 'Immediate',
+                'headline': f"{event} for {props.get('wfo')} area",
+                'description': f"NWS {props.get('wfo')} issued a {event}. Hail: {hail_f or 'N/A'}\", Wind: {wind_str or 'N/A'}.",
+                'instruction': "Take protective shelter immediately. Protect vehicles from severe hail damage.",
+                'hail_size_in': hail_f,
+                'hail_label': describe_hail_size(hail_f) if hail_f else None,
+                'hail_threat_type': props.get('hailthreat') or 'RADAR INDICATED',
+                'wind_gust': wind_str,
+                'wind_threat_type': props.get('windthreat') or 'RADAR INDICATED',
+                'tornado_detection': props.get('tornadotag'),
+                'effective': props.get('polygon_begin'),
+                'expires': props.get('expire'),
+                'wfo': f"NWS {props.get('wfo')}",
+                'area_desc': props.get('wfo', 'Active Zone'),
+                'center_lat': center_lat,
+                'center_lon': center_lon,
+                'distance_miles': dist_mi,
+                'motion': None,
+                'style': {
+                    'color': color,
+                    'fillColor': color,
+                    'weight': weight,
+                    'dashArray': None,
+                    'pulse': pulse,
+                    'fillOpacity': 0.22
+                },
+                'geometry': geom
+            })
 
     # Sort warnings by distance if user coords available
     if lat is not None and lon is not None:
@@ -851,48 +954,54 @@ def fetch_active_national_hotspots():
     Prioritizes real severe events with largest hail tags first.
     """
     url = "https://api.weather.gov/alerts/active"
-    data = http_get_json(url)
+    data = http_get_json(url) or {}
     hotspots = []
-    for f in (data.get('features') or []):
+    features = data.get('features')
+    if not isinstance(features, list):
+        features = []
+
+    for f in features:
         if not isinstance(f, dict):
             continue
-        props = f.get('properties') or {}
+        props = f.get('properties') if isinstance(f.get('properties'), dict) else {}
         event = props.get('event') or ''
-        geom = f.get('geometry')
-        params = props.get('parameters') or {}
-        hail_size_list = params.get('maxHailSize') or [None]
-        hail_size = hail_size_list[0] if hail_size_list else None
+        geom = f.get('geometry') if isinstance(f.get('geometry'), dict) else None
+        params = props.get('parameters') if isinstance(props.get('parameters'), dict) else {}
+        hail_size_list = params.get('maxHailSize') or []
+        hail_size = hail_size_list[0] if (isinstance(hail_size_list, list) and hail_size_list) else hail_size_list
         
         is_relevant = any(k in event for k in ['Severe Thunderstorm', 'Tornado', 'Special Weather'])
         if is_relevant:
             center_lat, center_lon = None, None
-            if geom and geom.get('coordinates'):
+            if geom and isinstance(geom.get('coordinates'), list):
                 coords = geom['coordinates']
                 try:
-                    if geom['type'] == 'Polygon':
+                    if geom.get('type') == 'Polygon' and coords:
                         pts = coords[0]
                         center_lon = sum(p[0] for p in pts) / len(pts)
                         center_lat = sum(p[1] for p in pts) / len(pts)
-                    elif geom['type'] == 'MultiPolygon':
+                    elif geom.get('type') == 'MultiPolygon' and coords and coords[0]:
                         pts = coords[0][0]
                         center_lon = sum(p[0] for p in pts) / len(pts)
                         center_lat = sum(p[1] for p in pts) / len(pts)
                 except Exception:
                     pass
             
-            area_desc = props.get('areaDesc', 'Active Threat Area')
+            area_desc = props.get('areaDesc', 'Active Threat Area') or 'Active Threat Area'
             hail_f = None
-            if hail_size:
+            if hail_size is not None:
                 try:
                     hail_f = float(hail_size)
-                except ValueError:
-                    pass
+                    if math.isnan(hail_f) or math.isinf(hail_f):
+                        hail_f = None
+                except (ValueError, TypeError):
+                    hail_f = None
 
             if center_lat and center_lon:
                 hotspots.append({
                     'event': event,
                     'headline': props.get('headline'),
-                    'area': area_desc.split(';')[0].strip(),
+                    'area': str(area_desc).split(';')[0].strip(),
                     'hail_size_in': hail_f,
                     'hail_label': describe_hail_size(hail_f) if hail_f else ("Hail Threat" if "Special" in event else "Severe Hazard"),
                     'latitude': round(center_lat, 4),
@@ -935,8 +1044,8 @@ def evaluate_hail_risk(alerts, lsr_reports, convective_data, regional_warnings=N
     for a in (alerts or []):
         if not isinstance(a, dict):
             continue
-        event = (a.get('event') or '').lower()
-        hail = a.get('hail_size_in') or 0.0
+        event = (a.get('event') or '').lower() if isinstance(a.get('event'), str) else ''
+        hail = _safe_float(a.get('hail_size_in'), 0.0)
         if 0.0 < hail <= 8.0 and hail > max_hail_in:
             max_hail_in = hail
 
@@ -963,13 +1072,20 @@ def evaluate_hail_risk(alerts, lsr_reports, convective_data, regional_warnings=N
         for rw in regional_warnings:
             if not isinstance(rw, dict):
                 continue
-            dist = rw.get('distance_miles')
-            if dist is None:
+            raw_dist = rw.get('distance_miles')
+            if raw_dist is None:
                 continue
-            hail = rw.get('hail_size_in') or 0.0
+            dist = _safe_float(raw_dist, -1.0)
+            if dist < 0:
+                continue
+            hail = _safe_float(rw.get('hail_size_in'), 0.0)
             motion = rw.get('motion')
             ev = rw.get('event') or ''
-            eta = motion.get('eta_mins') if isinstance(motion, dict) else None
+            eta = None
+            if isinstance(motion, dict) and motion.get('eta_mins') is not None:
+                eta = _safe_float(motion.get('eta_mins'), -1.0)
+                if eta < 0:
+                    eta = None
 
             if eta is not None and eta <= 50 and (hail >= 0.75 or 'Severe' in ev or 'Tornado' in ev):
                 b_score = 85 if hail >= 1.75 else 75
@@ -977,7 +1093,7 @@ def evaluate_hail_risk(alerts, lsr_reports, convective_data, regional_warnings=N
                 if hail > max_hail_in:
                     max_hail_in = hail
                 reasons.append(
-                    f"APPROACHING THREAT: {ev} with {describe_hail_size(hail)} hail tracked {dist:.1f} mi away, ETA ~{eta} mins!"
+                    f"APPROACHING THREAT: {ev} with {describe_hail_size(hail)} hail tracked {dist:.1f} mi away, ETA ~{eta:.0f} mins!"
                 )
             elif dist <= 12.0 and any(k in ev for k in ['Severe Thunderstorm', 'Tornado']):
                 score = max(score, 70)
@@ -993,9 +1109,9 @@ def evaluate_hail_risk(alerts, lsr_reports, convective_data, regional_warnings=N
     for r in (lsr_reports or []):
         if not isinstance(r, dict):
             continue
-        dist = r.get('distance_miles') if r.get('distance_miles') is not None else 999.0
-        hail = r.get('hail_size_in') if r.get('hail_size_in') is not None else 0.0
-        age = r.get('age_hours') if r.get('age_hours') is not None else 999.0
+        dist = _safe_float(r.get('distance_miles'), 999.0)
+        hail = _safe_float(r.get('hail_size_in'), 0.0)
+        age = _safe_float(r.get('age_hours'), 999.0)
         
         if age <= 24.0 and 0.0 < hail <= 8.0 and hail > max_hail_in:
             max_hail_in = hail
@@ -1005,10 +1121,10 @@ def evaluate_hail_risk(alerts, lsr_reports, convective_data, regional_warnings=N
             closest_recent_report = r
 
     if closest_recent_report:
-        hail = closest_recent_report.get('hail_size_in') if closest_recent_report.get('hail_size_in') is not None else 0.0
-        dist = closest_recent_report.get('distance_miles') if closest_recent_report.get('distance_miles') is not None else 999.0
-        is_mping = closest_recent_report.get('is_mping', False)
-        age = closest_recent_report.get('age_hours') if closest_recent_report.get('age_hours') is not None else 999.0
+        hail = _safe_float(closest_recent_report.get('hail_size_in'), 0.0)
+        dist = _safe_float(closest_recent_report.get('distance_miles'), 999.0)
+        is_mping = bool(closest_recent_report.get('is_mping', False))
+        age = _safe_float(closest_recent_report.get('age_hours'), 999.0)
         src_label = "mPING citizen report" if is_mping else "Official NWS spotter"
         time_desc = f"{age:.1f}h ago" if age < 24 else "recently"
 
@@ -1027,11 +1143,11 @@ def evaluate_hail_risk(alerts, lsr_reports, convective_data, regional_warnings=N
 
     # 4. Atmospheric Sounding Physics (Open-Meteo CAPE, LI, CIN, Freezing Level)
     c_data = convective_data if isinstance(convective_data, dict) else {}
-    cape = c_data.get('cape_j_kg') if c_data.get('cape_j_kg') is not None else 0
-    li = c_data.get('lifted_index') if c_data.get('lifted_index') is not None else 0.0
-    peak_cape = c_data.get('peak_cape_today') if c_data.get('peak_cape_today') is not None else 0
+    cape = _safe_float(c_data.get('cape_j_kg'), 0.0)
+    li = _safe_float(c_data.get('lifted_index'), 0.0)
+    peak_cape = _safe_float(c_data.get('peak_cape_today'), 0.0)
     cin_cap = c_data.get('cin_cap_strength') or 'WEAK'
-    fz_ft = c_data.get('freezing_level_ft') if c_data.get('freezing_level_ft') is not None else 12000
+    fz_ft = _safe_float(c_data.get('freezing_level_ft'), 12000.0)
 
     if cape >= 2500 or peak_cape >= 3000:
         score = max(score, score + 15)
@@ -1049,7 +1165,7 @@ def evaluate_hail_risk(alerts, lsr_reports, convective_data, regional_warnings=N
 
     if fz_ft <= 9500 and score >= 35:
         score += 5
-        reasons.append(f"Low freezing level ({fz_ft:,} ft AGL) promotes rapid hail survival to ground level.")
+        reasons.append(f"Low freezing level ({int(fz_ft):,} ft AGL) promotes rapid hail survival to ground level.")
 
     # Score clamping
     score = max(0, min(100, int(score)))

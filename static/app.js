@@ -13,7 +13,8 @@ function escapeHtml(str) {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
+    .replace(/'/g, "&#39;")
+    .replace(/`/g, "&#96;");
 }
 
 // Application State
@@ -378,10 +379,12 @@ function renderLocalizedRadarStation() {
   const lon = st.lon;
 
   // Radar tower beacon icon
+  const distTitle = st.distance_miles !== undefined ? ` (${escapeHtml(st.distance_miles)} mi)` : "";
+  const beaconTitle = `${escapeHtml(st.icao)} - ${escapeHtml(st.name)} WSR-88D${distTitle}`;
   const towerIcon = L.divIcon({
     className: "custom-radar-tower-icon",
     html: `
-      <div class="radar-tower-beacon" title="${st.icao} - ${st.name} WSR-88D (${st.distance_miles !== undefined ? st.distance_miles + ' mi' : ''})">
+      <div class="radar-tower-beacon" title="${beaconTitle}">
         <i class="fa-solid fa-tower-broadcast"></i>
         <div class="beacon-wave"></div>
       </div>
@@ -402,12 +405,20 @@ function renderLocalizedRadarStation() {
         ${st.distance_miles !== undefined ? `<div><b>Distance:</b> ${escapeHtml(st.distance_miles)} miles to target</div>` : ""}
       </div>
       <div class="station-badge">Level-III 0.5° Base Reflectivity</div>
-      <button class="hud-btn" style="margin-top: 8px; width: 100%; justify-content: center; font-size: 0.75rem; padding: 5px 8px; background: rgba(6,182,212,0.18); border: 1px solid rgba(6,182,212,0.5); cursor: pointer;" onclick="map.flyTo([${lat}, ${lon}], 9, { duration: 1.2 })">
+      <button id="btn-center-radar-${escapeHtml(st.id)}" class="hud-btn" style="margin-top: 8px; width: 100%; justify-content: center; font-size: 0.75rem; padding: 5px 8px; background: rgba(6,182,212,0.18); border: 1px solid rgba(6,182,212,0.5); cursor: pointer;">
         <i class="fa-solid fa-crosshairs text-cyan"></i> <span>Center On Radar Tower</span>
       </button>
     </div>
   `;
   marker.bindPopup(popupHtml);
+  marker.on('popupopen', () => {
+    const centerBtn = document.getElementById(`btn-center-radar-${st.id}`);
+    if (centerBtn) {
+      centerBtn.onclick = () => {
+        if (map) map.flyTo([lat, lon], 9, { duration: 1.2 });
+      };
+    }
+  });
   marker.bindTooltip(`<b>${escapeHtml(st.icao)}</b> - ${escapeHtml(st.name)} WSR-88D`, { direction: "top", offset: [0, -10] });
   radarStationMarkerGroup.addLayer(marker);
 
@@ -433,7 +444,7 @@ function renderLocalizedRadarStation() {
     const labelMarker = L.marker([lat + latOffset, lon], {
       icon: L.divIcon({
         className: "radar-range-ring-label",
-        html: `<span>${st.icao} ${r.label}</span>`,
+        html: `<span>${escapeHtml(st.icao)} ${escapeHtml(r.label)}</span>`,
         iconAnchor: [50, 8]
       }),
       interactive: false
@@ -869,7 +880,7 @@ function renderSearchResults(results) {
   const dropdown = document.getElementById("search-dropdown");
   dropdown.innerHTML = "";
 
-  if (!results || results.length === 0) {
+  if (!Array.isArray(results) || results.length === 0) {
     dropdown.innerHTML = `<div class="search-dropdown-item text-dim">No locations found</div>`;
     dropdown.style.display = "block";
     return;
@@ -952,6 +963,10 @@ async function refreshAssessment() {
     const url = `/api/assess?lat=${state.currentLat}&lon=${state.currentLon}&radius=${state.radiusMiles}&hours=${state.filterHours}`;
     const res = await fetch(url);
     const data = await res.json();
+    if (!res.ok || data.error || !data.assessment) {
+      console.warn("Assessment API error response:", data?.error || res.statusText);
+      return;
+    }
     state.assessmentData = data;
 
     renderThreatAssessment(data);
@@ -978,10 +993,10 @@ async function refreshAssessment() {
     await loadRainViewerRadar();
 
     // High threat alarm notification
-    const level = data.assessment.level;
+    const level = data.assessment?.level || "NONE";
     if ((level === "WARNING" || level === "EMERGENCY") && level !== state.threatLevel) {
       playWarningSiren(4.5);
-      speakAlert(`Hail warning alert for ${state.currentPlaceName}. Projected hail diameter: ${data.assessment.max_hail_label}. Take protective shelter immediately.`);
+      speakAlert(`Hail warning alert for ${state.currentPlaceName}. Projected hail diameter: ${data.assessment?.max_hail_label || 'Severe hail'}. Take protective shelter immediately.`);
     }
     state.threatLevel = level;
 
@@ -1089,7 +1104,7 @@ function renderWarningOverlays(data) {
     if (!isVisible) return;
 
     const s = w.style || {};
-    const color = s.color || "#f59e0b";
+    const color = (s.color && /^#[0-9a-fA-F]{3,8}$/.test(s.color)) ? s.color : "#f59e0b";
 
     const layer = L.geoJSON(w.geometry, {
       style: {
@@ -1200,7 +1215,7 @@ function renderWarningOverlays(data) {
         fillColor: "#ffffff",
         fillOpacity: 0.9,
         weight: 2
-      }).addTo(stormTracksGroup).bindTooltip(`Storm Core (${motion.speed_mph} mph)`);
+      }).addTo(stormTracksGroup).bindTooltip(`Storm Core (${escapeHtml(motion.speed_mph)} mph)`);
 
       // 15, 30, 45-min forecast projection pins
       motion.projected_path.forEach((p) => {
@@ -1211,7 +1226,7 @@ function renderWarningOverlays(data) {
           fillOpacity: 0.8,
           weight: 1
         }).addTo(stormTracksGroup);
-        pin.bindTooltip(`+${p.minutes}m Projected Position`);
+        pin.bindTooltip(`+${escapeHtml(p.minutes)}m Projected Position`);
       });
 
       // Target ETA connector if storm is moving toward user
@@ -1221,7 +1236,7 @@ function renderWarningOverlays(data) {
           weight: 2,
           dashArray: "3, 6",
           opacity: 0.9
-        }).addTo(stormTracksGroup).bindTooltip(`Projected Path to Target: ETA ~${motion.eta_mins}m`);
+        }).addTo(stormTracksGroup).bindTooltip(`Projected Path to Target: ETA ~${escapeHtml(motion.eta_mins)}m`);
       }
     }
   });
@@ -1253,7 +1268,9 @@ function renderWarningOverlays(data) {
       },
       onEachFeature: function(feature, layer) {
         const p = feature.properties || {};
-        layer.bindTooltip(`<b>SPC Day 1 Outlook:</b> ${p.LABEL || ''} - ${p.LABEL2 || 'Convective Risk'}`);
+        const safeLabel = escapeHtml(p.LABEL || "");
+        const safeLabel2 = escapeHtml(p.LABEL2 || "Convective Risk");
+        layer.bindTooltip(`<b>SPC Day 1 Outlook:</b> ${safeLabel} - ${safeLabel2}`);
       }
     });
     spcOutlookGroup.addLayer(spcLayer);
@@ -1267,8 +1284,9 @@ function renderGroundReports(reports) {
   groundReportsGroup.clearLayers();
   if (!document.getElementById("toggle-reports")?.checked) return;
 
-  reports.forEach((r) => {
-    const size = r.hail_size_in || 0;
+  (Array.isArray(reports) ? reports : []).forEach((r) => {
+    const rawSize = r.hail_size_in;
+    const size = typeof rawSize === 'number' && !isNaN(rawSize) ? rawSize : (parseFloat(rawSize) || 0.0);
     let color = "#10b981";
     let radius = 10;
 
