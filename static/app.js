@@ -5,6 +5,17 @@
  * Zero API keys required - 100% free open data.
  */
 
+// HTML sanitization helper for XSS prevention (SEC-02)
+function escapeHtml(str) {
+  if (str === null || str === undefined) return "";
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 // Application State
 const state = {
   currentLat: 32.7767, // Default: Dallas, TX
@@ -382,13 +393,13 @@ function renderLocalizedRadarStation() {
   const marker = L.marker([lat, lon], { icon: towerIcon, zIndexOffset: 2000 });
   const popupHtml = `
     <div class="radar-station-popup">
-      <h4><i class="fa-solid fa-tower-broadcast"></i> ${st.icao} &bull; ${st.name}</h4>
+      <h4><i class="fa-solid fa-tower-broadcast"></i> ${escapeHtml(st.icao)} &bull; ${escapeHtml(st.name)}</h4>
       <div class="station-meta">
         <div><b>Type:</b> NOAA WSR-88D Doppler Radar</div>
-        <div><b>Location:</b> ${st.name}, ${st.state}</div>
+        <div><b>Location:</b> ${escapeHtml(st.name)}, ${escapeHtml(st.state)}</div>
         <div><b>Coordinates:</b> ${lat.toFixed(4)}°, ${lon.toFixed(4)}°</div>
-        <div><b>Elevation:</b> ${st.elevation} m MSL</div>
-        ${st.distance_miles !== undefined ? `<div><b>Distance:</b> ${st.distance_miles} miles to target</div>` : ""}
+        <div><b>Elevation:</b> ${escapeHtml(st.elevation)} m MSL</div>
+        ${st.distance_miles !== undefined ? `<div><b>Distance:</b> ${escapeHtml(st.distance_miles)} miles to target</div>` : ""}
       </div>
       <div class="station-badge">Level-III 0.5° Base Reflectivity</div>
       <button class="hud-btn" style="margin-top: 8px; width: 100%; justify-content: center; font-size: 0.75rem; padding: 5px 8px; background: rgba(6,182,212,0.18); border: 1px solid rgba(6,182,212,0.5); cursor: pointer;" onclick="map.flyTo([${lat}, ${lon}], 9, { duration: 1.2 })">
@@ -397,7 +408,7 @@ function renderLocalizedRadarStation() {
     </div>
   `;
   marker.bindPopup(popupHtml);
-  marker.bindTooltip(`<b>${st.icao}</b> - ${st.name} WSR-88D`, { direction: "top", offset: [0, -10] });
+  marker.bindTooltip(`<b>${escapeHtml(st.icao)}</b> - ${escapeHtml(st.name)} WSR-88D`, { direction: "top", offset: [0, -10] });
   radarStationMarkerGroup.addLayer(marker);
 
   // Range rings: 50 km (27 nmi), 100 km (54 nmi), 230 km (124 nmi)
@@ -867,7 +878,7 @@ function renderSearchResults(results) {
   results.forEach((item) => {
     const el = document.createElement("div");
     el.className = "search-dropdown-item";
-    el.innerHTML = `<i class="fa-solid fa-location-dot text-cyan"></i> <span>${item.display_name}</span>`;
+    el.innerHTML = `<i class="fa-solid fa-location-dot text-cyan"></i> <span>${escapeHtml(item.display_name)}</span>`;
     el.addEventListener("click", () => {
       state.currentLat = item.lat;
       state.currentLon = item.lon;
@@ -906,10 +917,10 @@ async function loadLiveHotspots() {
       item.className = "hotspot-item";
       item.innerHTML = `
         <div>
-          <div class="hotspot-area">${h.area}</div>
-          <div class="hotspot-event">${h.event}</div>
+          <div class="hotspot-area">${escapeHtml(h.area)}</div>
+          <div class="hotspot-event">${escapeHtml(h.event)}</div>
         </div>
-        <div class="hotspot-tag">${h.hail_label || "Hail Risk"}</div>
+        <div class="hotspot-tag">${escapeHtml(h.hail_label || "Hail Risk")}</div>
       `;
       item.addEventListener("click", () => {
         state.currentLat = h.latitude;
@@ -1115,50 +1126,53 @@ function renderWarningOverlays(data) {
     const hailTag = w.hail_label || (w.hail_size_in ? `${w.hail_size_in.toFixed(2)}" Hail` : "N/A");
     const windTag = w.wind_gust || "N/A";
     const motion = w.motion;
-    let motionText = "Radar Scan";
+    let motionSafe = "Radar Scan";
     if (motion) {
-      motionText = `Moving ${motion.heading_deg}° at ${motion.speed_mph} mph`;
+      motionSafe = `Moving ${escapeHtml(motion.heading_deg)}° at ${escapeHtml(motion.speed_mph)} mph`;
       if (motion.eta_mins !== null && motion.eta_mins !== undefined) {
-        motionText += ` &bull; <b style="color:var(--color-magenta);">ETA ~${motion.eta_mins} mins</b>`;
+        motionSafe += ` &bull; <b style="color:var(--color-magenta);">ETA ~${escapeHtml(motion.eta_mins)} mins</b>`;
         if (nearestApproachingEta === null || motion.eta_mins < nearestApproachingEta) {
           nearestApproachingEta = motion.eta_mins;
         }
       }
     }
 
+    const directiveRaw = w.instruction || w.headline || (w.description ? w.description.slice(0, 160) + '...' : 'Monitor local conditions.');
+    const directiveSafe = escapeHtml(directiveRaw);
+
     layer.bindPopup(`
       <div class="nws-popup-card">
         <div class="nws-popup-top">
           <div class="nws-event-name" style="color: ${color};">
             <span class="nws-pulse-dot" style="background: ${color};"></span>
-            ${w.event}
+            ${escapeHtml(w.event)}
           </div>
-          <span style="font-size: 0.68rem; color: var(--text-dim); font-family: var(--font-mono);">${w.wfo || 'NWS'}</span>
+          <span style="font-size: 0.68rem; color: var(--text-dim); font-family: var(--font-mono);">${escapeHtml(w.wfo || 'NWS')}</span>
         </div>
 
         <div class="nws-badge-row">
           <span class="nws-tag-pill" style="color: var(--color-amber);">
-            <i class="fa-solid fa-cloud-meatball"></i> HAIL: ${hailTag}
+            <i class="fa-solid fa-cloud-meatball"></i> HAIL: ${escapeHtml(hailTag)}
           </span>
           <span class="nws-tag-pill" style="color: var(--color-cyan);">
-            <i class="fa-solid fa-wind"></i> WIND: ${windTag}
+            <i class="fa-solid fa-wind"></i> WIND: ${escapeHtml(windTag)}
           </span>
           ${w.tornado_detection ? `
             <span class="nws-tag-pill" style="color: var(--color-red);">
-              <i class="fa-solid fa-tornado"></i> ${w.tornado_detection}
+              <i class="fa-solid fa-tornado"></i> ${escapeHtml(w.tornado_detection)}
             </span>
           ` : ''}
         </div>
 
         <div class="nws-meta-row">
-          <div><b>Timing:</b> ${expiresText}</div>
-          <div><b>Distance:</b> ${w.distance_miles !== null ? w.distance_miles + ' mi from target' : 'In affected zone'}</div>
-          <div><b>Motion:</b> ${motionText}</div>
+          <div><b>Timing:</b> ${escapeHtml(expiresText)}</div>
+          <div><b>Distance:</b> ${w.distance_miles !== null && w.distance_miles !== undefined ? escapeHtml(w.distance_miles) + ' mi from target' : 'In affected zone'}</div>
+          <div><b>Motion:</b> ${motionSafe}</div>
         </div>
 
         <div class="nws-instruction-box">
           <i class="fa-solid fa-triangle-exclamation"></i>
-          <b>DIRECTIVE:</b> ${w.instruction || w.headline || w.description.slice(0, 160) + '...'}
+          <b>DIRECTIVE:</b> ${directiveSafe}
         </div>
       </div>
     `);
@@ -1281,21 +1295,27 @@ function renderGroundReports(reports) {
     });
 
     const marker = L.marker([r.latitude, r.longitude], { icon: markerIcon });
+    const srcTypeEsc = escapeHtml(r.source_type || "Observer");
+    const hailDescEsc = escapeHtml(r.hail_description || "Hail");
+    const distMiEsc = r.distance_miles !== null && r.distance_miles !== undefined ? escapeHtml(r.distance_miles) : "N/A";
+    const obsTimeEsc = escapeHtml(r.age_hours !== null && r.age_hours !== undefined && r.age_hours < 24 ? r.age_hours + 'h ago' : (r.valid || ''));
+    const remarkEsc = escapeHtml(r.remark || '');
+
     marker.bindPopup(`
       <div style="font-family: var(--font-sans); min-width: 200px;">
         <div style="font-weight: 700; color: ${color}; font-size: 0.88rem; margin-bottom: 4px;">
-          <i class="fa-solid fa-users"></i> ${r.source_type}
+          <i class="fa-solid fa-users"></i> ${srcTypeEsc}
         </div>
         <div style="font-family: var(--font-mono); font-size: 0.8rem; margin-bottom: 4px;">
-          <b>HAIL:</b> <span style="color: var(--color-amber);">${r.hail_description}</span>
+          <b>HAIL:</b> <span style="color: var(--color-amber);">${hailDescEsc}</span>
         </div>
         <div style="font-size: 0.72rem; color: #94a3b8; margin-bottom: 2px;">
-          <b>Distance:</b> ${r.distance_miles} miles away
+          <b>Distance:</b> ${distMiEsc} miles away
         </div>
         <div style="font-size: 0.72rem; color: #94a3b8; margin-bottom: 6px;">
-          <b>Observed:</b> ${r.age_hours < 24 ? r.age_hours + 'h ago' : r.valid}
+          <b>Observed:</b> ${obsTimeEsc}
         </div>
-        ${r.remark ? `<div style="font-size: 0.7rem; color: #cbd5e1; font-style: italic; background: rgba(0,0,0,0.3); padding: 4px 6px; border-radius: 4px;">"${r.remark}"</div>` : ''}
+        ${remarkEsc ? `<div style="font-size: 0.7rem; color: #cbd5e1; font-style: italic; background: rgba(0,0,0,0.3); padding: 4px 6px; border-radius: 4px;">"${remarkEsc}"</div>` : ''}
       </div>
     `);
 
@@ -1372,6 +1392,9 @@ function showRadarFrame(index, host) {
 }
 
 function playRadarLoop() {
+  if (!state.radarFrames || state.radarFrames.length === 0) {
+    return;
+  }
   if (state.radarPlaying) {
     clearInterval(state.radarTimer);
     state.radarPlaying = false;
@@ -1380,6 +1403,12 @@ function playRadarLoop() {
     state.radarPlaying = true;
     document.getElementById("play-btn-icon").className = "fa-solid fa-pause";
     state.radarTimer = setInterval(() => {
+      if (!state.radarFrames || state.radarFrames.length === 0) {
+        clearInterval(state.radarTimer);
+        state.radarPlaying = false;
+        document.getElementById("play-btn-icon").className = "fa-solid fa-play";
+        return;
+      }
       state.radarIndex = (state.radarIndex + 1) % state.radarFrames.length;
       showRadarFrame(state.radarIndex);
     }, 700);
@@ -1810,14 +1839,14 @@ function renderIntelFeed(alerts, reports, regWarnings = []) {
     el.className = "feed-item";
     el.innerHTML = `
       <div class="feed-head">
-        <span class="feed-source ${item.type === 'alert' ? 'nws' : (item.type === 'watch' ? 'watch' : '')}">${item.source}</span>
-        <span class="feed-time">${item.time}</span>
+        <span class="feed-source ${item.type === 'alert' ? 'nws' : (item.type === 'watch' ? 'watch' : '')}">${escapeHtml(item.source)}</span>
+        <span class="feed-time">${escapeHtml(item.time)}</span>
       </div>
       <div class="feed-body">
-        <span>${item.title}</span>
-        <span class="feed-hail-tag">${item.tag}</span>
+        <span>${escapeHtml(item.title)}</span>
+        <span class="feed-hail-tag">${escapeHtml(item.tag)}</span>
       </div>
-      <div class="feed-remark">"${item.remark}"</div>
+      <div class="feed-remark">"${escapeHtml(item.remark)}"</div>
     `;
     container.appendChild(el);
   });
