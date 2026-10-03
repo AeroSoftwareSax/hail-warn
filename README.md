@@ -1,5 +1,11 @@
 # ⚡ HAILWARN - Severe Hail Detection & Early Warning Radar System
 
+[![Security & Vulnerability Pipeline](https://github.com/AeroSoftwareSax/hail-warn/actions/workflows/security.yml/badge.svg)](https://github.com/AeroSoftwareSax/hail-warn/actions/workflows/security.yml)
+[![CodeQL Security Analysis](https://github.com/AeroSoftwareSax/hail-warn/actions/workflows/codeql.yml/badge.svg)](https://github.com/AeroSoftwareSax/hail-warn/actions/workflows/codeql.yml)
+[![Security: Gitleaks](https://img.shields.io/badge/security-gitleaks-blue.svg)](https://github.com/gitleaks/gitleaks)
+[![Security: Bandit](https://img.shields.io/badge/security-bandit-yellow.svg)](https://github.com/PyCQA/bandit)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
+
 A web application and sensor-fusion warning system for real-time hail detection. Analyzes severe convective storm threats at your current GPS location, any searched city/address, or clickable map coordinate.
 
 Combines multiple authoritative meteorological feeds into a unified **Hail Risk Score (0-100%)** and **Threat Warning Level (NONE, MONITOR, WATCH, WARNING, EMERGENCY)** using **100% free, open-source APIs with zero API keys required**.
@@ -124,17 +130,44 @@ The threat evaluation engine in `hail_core.py` performs weighted sensor fusion:
 
 ---
 
+## 🔒 Automated Security & DevSecOps Pipelines
+
+The repository includes a comprehensive GitHub Actions CI/CD and DevSecOps security pipeline running on every push, pull request, manual dispatch, and weekly schedule:
+
+| Security Layer | Tool | Scope & Functionality |
+| :--- | :--- | :--- |
+| **Secret Scanning** | **Gitleaks** (`gitleaks-action`) | Full git history and repository commit scan for leaked credentials, API tokens, and private keys. |
+| **Python SAST** | **Bandit** (`bandit`) | Static Application Security Testing for Python security vulnerabilities (insecure calls, injection, deserialization). Uploads SARIF reports to GitHub Security. |
+| **Vulnerability Scanning** | **Trivy** (`aquasecurity/trivy-action`) | Scans file systems, actions, and code for CVEs and misconfigurations. Produces both table and SARIF alerts. |
+| **Code Scanning** | **GitHub CodeQL** | Semantic code analysis and taint tracking across Python backend and JavaScript frontend. |
+| **Supply Chain & SCA** | **pip-audit** | Audits runtime and development dependencies against the Python Advisory Database (PyPA/OSV). |
+| **Dependency Updates** | **Dependabot** | Weekly automated security audits and pull requests for GitHub Actions and pip packages. |
+| **Automated Testing** | **unittest** | Multi-version Python test matrix (3.10, 3.11, 3.12, 3.13) verifying sensor fusion algorithms and API contracts. |
+
+---
+
 ## 📂 Project Structure
 
 ```text
 hail_warn/
-├── hail_core.py         # Multi-sensor fusion engine, API fetchers, hail size logic
-├── server.py            # Multithreaded Python HTTP server & REST API
-├── test_server.py       # Automated unit & integration test suite
+├── .github/
+│   ├── dependabot.yml            # Automated dependency & security update config
+│   └── workflows/
+│       ├── security.yml          # Secret scanning, Bandit, Trivy, pip-audit & tests
+│       └── codeql.yml            # GitHub CodeQL semantic analysis (Python & JS)
+├── .bandit.yaml                  # Bandit SAST analyzer configuration
+├── .gitleaks.toml                # Gitleaks secret scanning configuration
+├── pyproject.toml                # Project metadata, tool configurations, and linter settings
+├── requirements-dev.txt          # Security scanning and development tools
+├── requirements.txt              # Runtime dependency documentation (zero external dependencies)
+├── AGENTS.md                     # Agent operating guidelines & commit author rules
+├── hail_core.py                  # Multi-sensor fusion engine, API fetchers, hail size logic
+├── server.py                     # Multithreaded Python HTTP server & REST API
+├── test_server.py                # Automated unit & integration test suite
 ├── static/
-│   ├── index.html            # Operations dashboard HTML5 structure
-│   ├── styles.css            # Tactical dark theme, radar HUD, and responsive styling
-│   ├── app.js                # Client-side map logic, radar sweep engine, Web Audio siren
-│   └── nexrad_stations.json  # 160 US WSR-88D Doppler radar stations database
-└── README.md                 # Documentation
+│   ├── index.html                # Operations dashboard HTML5 structure
+│   ├── styles.css                # Tactical dark theme, radar HUD, and responsive styling
+│   ├── app.js                    # Client-side map logic, radar sweep engine, Web Audio siren
+│   └── nexrad_stations.json      # 160 US WSR-88D Doppler radar stations database
+└── README.md                     # Documentation & operational architecture
 ```

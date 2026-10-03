@@ -1,0 +1,14 @@
+# Gitleaks Configuration for HailWarn
+# Secret and sensitive credential detection rules
+
+title = "HailWarn Gitleaks Secret Detection Config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Global allowlist for testing and build artifacts"
+paths = [
+  '''^\.git/''',
+  '''^__pycache__/'''
+]

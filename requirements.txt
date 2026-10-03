@@ -1,0 +1,4 @@
+# HailWarn Runtime Dependencies
+# Zero external packages required - built 100% on the Python 3 standard library
+# (http.server, urllib.request, concurrent.futures, json, math, ssl).
+# This file is maintained for SCA dependency vulnerability scanners and package managers.

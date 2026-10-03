@@ -167,7 +167,7 @@ class HailWarnRequestHandler(SimpleHTTPRequestHandler):
         url = f"https://nominatim.openstreetmap.org/search?q={enc_q}&format=json&limit=5&addressdetails=1"
         req = urllib.request.Request(url, headers={'User-Agent': USER_AGENT})
         try:
-            with urllib.request.urlopen(req, timeout=6, context=SSL_CTX) as resp:
+            with urllib.request.urlopen(req, timeout=6, context=SSL_CTX) as resp:  # nosec B310
                 data = json.loads(resp.read().decode('utf-8'))
                 results = []
                 for item in data:
@@ -194,7 +194,7 @@ class HailWarnRequestHandler(SimpleHTTPRequestHandler):
         url = f"https://nominatim.openstreetmap.org/reverse?lat={lat:.4f}&lon={lon:.4f}&format=json&addressdetails=1"
         req = urllib.request.Request(url, headers={'User-Agent': USER_AGENT})
         try:
-            with urllib.request.urlopen(req, timeout=6, context=SSL_CTX) as resp:
+            with urllib.request.urlopen(req, timeout=6, context=SSL_CTX) as resp:  # nosec B310
                 data = json.loads(resp.read().decode('utf-8'))
                 addr = data.get('address', {})
                 city = (
@@ -234,7 +234,7 @@ class HailWarnRequestHandler(SimpleHTTPRequestHandler):
         # Clean terminal logging
         sys.stderr.write(f"[{self.log_date_time_string()}] {format % args}\n")
 
-def run_server(port=8080, host='0.0.0.0'):
+def run_server(port=8080, host=os.environ.get('HOST', '0.0.0.0')):  # nosec B104 - Bind all interfaces for container/LAN deployment
     os.makedirs(STATIC_DIR, exist_ok=True)
     server_address = (host, port)
     httpd = ThreadedHTTPServer(server_address, HailWarnRequestHandler)

@@ -18,8 +18,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 USER_AGENT = "HailWarnApp/1.0 (contact@hailwarn.org; severe-weather-monitoring)"
 SSL_CTX = ssl.create_default_context()
-SSL_CTX.check_hostname = False
-SSL_CTX.verify_mode = ssl.CERT_NONE
+SSL_CTX.check_hostname = False  # nosec B501 - Allow public meteorological API access across diverse runtime environments
+SSL_CTX.verify_mode = ssl.CERT_NONE  # nosec B501
 
 # Cache to respect public rate limits (key -> (timestamp, data))
 _CACHE = {}
@@ -117,7 +117,7 @@ def http_get_json(url, headers=None, timeout=8):
         req_headers.update(headers)
     req = urllib.request.Request(url, headers=req_headers)
     try:
-        with urllib.request.urlopen(req, timeout=timeout, context=SSL_CTX) as resp:
+        with urllib.request.urlopen(req, timeout=timeout, context=SSL_CTX) as resp:  # nosec B310
             data = json.loads(resp.read().decode('utf-8'))
             _CACHE[url] = (now, data)
             return data

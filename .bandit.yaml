@@ -1,0 +1,16 @@
+# Bandit configuration for HailWarn
+# https://bandit.readthedocs.io/
+
+# Exclude test files and caches from analysis
+exclude_dirs:
+  - "/__pycache__"
+  - "/tests"
+
+assert_used:
+  skips:
+    - "*_test.py"
+    - "test_*.py"
+
+# B101: assert_used (skips assert in tests)
+skips:
+  - B101
