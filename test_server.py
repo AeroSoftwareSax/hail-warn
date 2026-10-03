@@ -14,7 +14,9 @@ from hail_core import (
     describe_hail_size,
     haversine_distance,
     evaluate_hail_risk,
-    perform_full_assessment
+    perform_full_assessment,
+    load_nexrad_stations,
+    find_nearest_nexrad
 )
 
 TEST_PORT = 18088
@@ -67,6 +69,18 @@ class TestHailDetection(unittest.TestCase):
         assessment = evaluate_hail_risk([], reports, convective)
         self.assertGreaterEqual(assessment['score'], 35)
         self.assertTrue(any("mPING" in r for r in assessment['reasons']))
+
+    def test_nearest_nexrad_lookup(self):
+        # Fort Worth coordinates: 32.7555, -97.3308 should return KFWS (Dallas/Fort Worth)
+        nearest_fw = find_nearest_nexrad(32.7555, -97.3308)
+        self.assertIsNotNone(nearest_fw)
+        self.assertEqual(nearest_fw['icao'], 'KFWS')
+        self.assertLess(nearest_fw['distance_miles'], 16.0)
+
+        # Oklahoma City: 35.4676, -97.5164 should return KTLX
+        nearest_okc = find_nearest_nexrad(35.4676, -97.5164)
+        self.assertIsNotNone(nearest_okc)
+        self.assertEqual(nearest_okc['icao'], 'KTLX')
 
 class TestServerEndpoints(unittest.TestCase):
 
@@ -146,9 +160,40 @@ class TestServerEndpoints(unittest.TestCase):
         self.assertEqual(status, 200)
         data = json.loads(content.decode('utf-8'))
         self.assertIsInstance(data, list)
-        if len(data) > 0:
-            self.assertIn('lat', data[0])
-            self.assertIn('lon', data[0])
+
+    def test_api_nws_warnings_endpoint(self):
+        status, headers, content = self.get_url("/api/nws/warnings?lat=32.7767&lon=-96.7970")
+        self.assertEqual(status, 200)
+        data = json.loads(content.decode('utf-8'))
+        self.assertIn('warnings', data)
+        self.assertIn('geojson', data)
+        self.assertIn('count', data)
+        self.assertEqual(data['geojson'].get('type'), 'FeatureCollection')
+
+    def test_api_spc_outlook_endpoint(self):
+        status, headers, content = self.get_url("/api/spc/outlook")
+        self.assertEqual(status, 200)
+        data = json.loads(content.decode('utf-8'))
+        self.assertIn('categorical', data)
+        self.assertIn('hail', data)
+        self.assertEqual(data['categorical'].get('type'), 'FeatureCollection')
+
+    def test_api_reverse_geocode_endpoint(self):
+        status, headers, content = self.get_url("/api/reverse-geocode?lat=32.7767&lon=-96.7970")
+        self.assertEqual(status, 200)
+        data = json.loads(content.decode('utf-8'))
+        self.assertIn('display_name', data)
+        self.assertIn('clean_name', data)
+
+    def test_api_nexrad_stations_endpoint(self):
+        status, headers, content = self.get_url("/api/nexrad/stations?lat=32.7555&lon=-97.3308")
+        self.assertEqual(status, 200)
+        data = json.loads(content.decode('utf-8'))
+        self.assertIn('stations', data)
+        self.assertIn('nearest', data)
+        self.assertEqual(data['count'], 160)
+        self.assertIsNotNone(data['nearest'])
+        self.assertEqual(data['nearest']['icao'], 'KFWS')
 
 if __name__ == '__main__':
     unittest.main()

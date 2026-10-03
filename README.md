@@ -8,31 +8,47 @@ Combines multiple authoritative meteorological feeds into a unified **Hail Risk 
 
 ## 🌟 Key Features
 
-- 🛰️ **Interactive NEXRAD Radar Map (dBZ)**:
+- 🗺️ **Multi-Basemap Operations Engine (No API Keys Required)**:
+  - **Tactical Dark**: Esri World Dark Gray Canvas with high-contrast county/city reference labels (zero watermarks, zero API keys).
+  - **Satellite Hybrid**: Esri World Imagery combined with tactical dark reference boundaries.
+  - **Clean Streets**: Crisp OpenStreetMap roadway and street navigation map.
+- 🛰️ **Multi-Source NEXRAD Radar Map (No Zoom Errors)**:
   - Dynamic radar loop animation powered by RainViewer API with playback controls, scrub timeline, and opacity slider.
-  - Calibrated dBZ reflectivity scale indicating rain, graupel, severe hail, and destructive hail cores (>60 dBZ).
-  - Optional toggle for high-resolution Iowa Environmental Mesonet (IEM) NEXRAD Base Reflectivity composite.
+  - Smooth scaling configuration (`maxNativeZoom: 7, maxZoom: 18`) completely eliminating "Zoom Level Not Supported" tiles.
+  - Switchable high-resolution Iowa Environmental Mesonet (IEM) NEXRAD Base Reflectivity composite supporting deep native zoom.
+- 🚨 **Modernized NWS Weather Alerts & Storm-Based Warnings (SBW)**:
+  - Real-time active Severe Thunderstorm and Tornado Warning polygons drawn with neon glowing outlines and pulsating animations.
+  - Flash Flood Warnings, Special Weather Statements & Hail Advisories, and Severe Watches categorized with distinct styling.
+  - Glassmorphism interactive popups displaying official NWS `maxHailSize` tags (e.g. `1.00"`, `1.75"`, `2.75"`), wind gusts, tornado detection, WFO office, and countdown expiration timers.
+  - **Storm Motion Vectors & Swath Forecast**: Parses storm motion heading and speed, projects forward 15, 30, and 45-minute cell positions, and computes **Estimated Time of Arrival (ETA)** if bearing towards your location.
+  - **NOAA SPC Day 1 Convective Outlook**: Overlay showing official Storm Prediction Center categorical and hail risk zones.
+- 🎯 **Localized Single-Site WSR-88D NEXRAD Doppler Radars**:
+  - Direct Level-III 0.5° Base Reflectivity tiles directly from individual radar dishes (e.g. **KFWS** for Fort Worth/Dallas, **KTLX** for Oklahoma City, **KHGX** for Houston) for superior gate accuracy, lowest ground-level beam angle, and zero mosaic smoothing.
+  - **Auto-Nearest Radar Detection**: Automatically locks onto the closest WSR-88D Doppler station whenever you search, double-click, or locate.
+  - **Manual Station Selector**: Select from all 160 national NEXRAD radar stations grouped by state.
+  - **Interactive Radar Tower & Range Rings**: Pulsing tower beacon marker with 50 km (27 nmi), 100 km (54 nmi), and 230 km (124 nmi standard Doppler coverage) distance rings.
+- 🔄 **Real-Time 360° Radar Sweep Beam**:
+  - High-performance GPU-accelerated tactical Plan Position Indicator (PPI) sweep beam rotating clockwise with an authentic glowing phosphor decay trail.
+  - Anchored dynamically to the localized radar antenna dish (e.g. KFWS at Fort Worth Spinks Airport).
+  - One-click toggle in both HUD and overlay controls.
 - 👥 **mPING & Spotter Ground Truth Verification**:
-  - Ingests crowdsourced citizen reports from **NOAA mPING** and official NWS Trained Spotters, Emergency Managers, and Law Enforcement via the Iowa State IEM LSR feed.
-  - Shows exact hailstone diameter (inches), report age, distance from your location, and raw observer remarks.
-- 🚨 **Official NWS Weather Alerts & Storm-Based Warnings (SBW)**:
-  - Real-time active Severe Thunderstorm and Tornado Warning polygons drawn directly on the map.
-  - Extracts official NWS `maxHailSize` tags (e.g. `1.00"`, `1.75"`, `2.75"`) and threat types (`RADAR INDICATED` vs `OBSERVED`).
-- 🌡️ **Atmospheric Sounding & Convective Physics**:
-  - Incorporates Convective Available Potential Energy (CAPE in J/kg) and Lifted Index (LI) from Open-Meteo to gauge updraft strength capable of suspending large hailstones.
-- 📍 **Location Flexibility**:
-  - **My Location**: HTML5 Geolocation API with high accuracy GPS fix.
-  - **Address Search**: Real-time debounced geocoding via OpenStreetMap Nominatim.
-  - **Live Severe Hotspots**: Instant quick-jump menu scanning nationwide NWS bulletins for active severe weather cells right now.
-  - **Click-to-Inspect**: Click anywhere on the map to evaluate hail risk at that coordinate.
-- 🔊 **Synthesized Web Audio Alert Siren**:
-  - Browser-synthesized dual-tone warning siren and attention chime using the Web Audio API (zero audio files needed).
-  - Automatically sounds an alarm when threat level escalates to `WARNING` or `EMERGENCY`.
-- 🛡️ **Hail Diameter Scale & Damage Profile**:
-  - Realistically lit hailstone disc graphic scaled to estimated diameter.
-  - Physical object comparisons (Quarter, Golf Ball, Tennis Ball, Baseball, Softball).
-  - Damage impact assessment for vehicles, roofs, and outdoor human safety.
-- 🚀 **Zero External Pip Dependencies**:
+  - Ingests crowdsourced citizen reports from **NOAA mPING** and official NWS Trained Spotters, Emergency Managers, and Law Enforcement via Iowa State IEM LSR feeds.
+  - Filter reports by radius (15, 30, 45, 75, 120 mi) and time horizon (6h, 24h, 3 days, 7 days).
+- 🌡️ **Atmospheric Convective Barometer & Thermodynamic Soundings**:
+  - Visual CAPE gauge bar (J/kg) and Lifted Index (LI).
+  - Convective Inhibition (CIN) "Cap" status analyzer (Weak/Explosive, Moderate, Strong Cap).
+  - Freezing Level Height (ft / m AGL) with Hail Survival rating.
+  - Surface Barometric Pressure (inHg / hPa) and Wind Gusts (mph).
+  - Composite **Hail Potential Index (HPI, 0-100)**.
+- 🛡️ **Interactive Hail Property Damage Simulator**:
+  - Interactive scenario slider (0.25" to 4.50") allowing users to simulate impact on vehicles, roofs & siding, solar panels & glass, and human safety.
+  - Dynamic actionable protective action checklists.
+- 🔊 **Voice Speech Synthesis & Web Audio Alert Siren**:
+  - Spoken Voice Announcements (Web Speech API) declaring incoming hail threats and ETA.
+  - Browser-synthesized dual-tone warning siren and attention chime using Web Audio API.
+- 📄 **Operations Threat Intelligence Briefing Export**:
+  - One-click export modal generating formatted text briefs, downloadable reports, and full JSON payloads.
+- 🚀 **Zero External Dependencies**:
   - Built entirely on Python 3 standard library (`http.server`, `urllib.request`, `concurrent.futures`, `json`).
 
 ---
@@ -41,10 +57,13 @@ Combines multiple authoritative meteorological feeds into a unified **Hail Risk 
 
 | Data Source | Provider | Purpose | Authentication |
 | :--- | :--- | :--- | :--- |
-| **NWS Active Alerts** | National Weather Service (`api.weather.gov`) | Severe Thunderstorm & Tornado warning polygons, headlines, hail tags | **None (Free / Public)** |
+| **Tactical Cartography** | Esri & OpenStreetMap | Dark Canvas, Satellite Hybrid, Clean Streets basemaps | **None (Free / Public)** |
+| **NWS Active Alerts & SBW** | National Weather Service (`api.weather.gov`) | Severe Thunderstorm & Tornado warning polygons, headlines, hail tags, storm motion | **None (Free / Public)** |
+| **IEM Storm-Based Warnings** | Iowa Environmental Mesonet (`mesonet.agron.iastate.edu`) | Active storm-based polygons, VTEC tags, hail/wind tags | **None (Free / Public)** |
 | **Local Storm Reports (LSR) & mPING** | Iowa Environmental Mesonet (`mesonet.agron.iastate.edu`) | Ground-truth hail observations, mPING citizen reports, diameter measurements | **None (Free / Public)** |
-| **Radar Reflectivity (dBZ)** | RainViewer (`api.rainviewer.com`) | Timestamped NEXRAD composite radar tiles and animation frames | **None (Free / Public)** |
-| **Convective Soundings** | Open-Meteo (`api.open-meteo.com`) | Convective Available Potential Energy (CAPE), Lifted Index, convective rain | **None (Free / Public)** |
+| **Radar Reflectivity (dBZ)** | RainViewer (`api.rainviewer.com`) & IEM NEXRAD | Timestamped NEXRAD composite radar tiles and animation frames | **None (Free / Public)** |
+| **Convective Soundings** | Open-Meteo (`api.open-meteo.com`) | CAPE, Lifted Index, Convective Inhibition (CIN), Freezing Level Height, surface pressure | **None (Free / Public)** |
+| **SPC Day 1 Outlook** | NOAA Storm Prediction Center (`spc.noaa.gov`) | Severe thunderstorm and hail probability outlook polygons | **None (Free / Public)** |
 | **Geocoding & Reverse Geocoding** | OpenStreetMap Nominatim (`nominatim.openstreetmap.org`) | Address, city, and coordinate name resolution | **None (Free / Public)** |
 
 ---
@@ -113,8 +132,9 @@ hail_warn/
 ├── server.py            # Multithreaded Python HTTP server & REST API
 ├── test_server.py       # Automated unit & integration test suite
 ├── static/
-│   ├── index.html       # Operations dashboard HTML5 structure
-│   ├── styles.css       # Tactical dark theme, radar HUD, and responsive styling
-│   └── app.js           # Client-side map logic, radar loop, Web Audio siren
-└── README.md            # Documentation
+│   ├── index.html            # Operations dashboard HTML5 structure
+│   ├── styles.css            # Tactical dark theme, radar HUD, and responsive styling
+│   ├── app.js                # Client-side map logic, radar sweep engine, Web Audio siren
+│   └── nexrad_stations.json  # 160 US WSR-88D Doppler radar stations database
+└── README.md                 # Documentation
 ```

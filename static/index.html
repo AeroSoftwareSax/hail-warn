@@ -68,6 +68,16 @@
         </div>
       </div>
 
+      <!-- Export Briefing Button -->
+      <button id="briefing-btn" class="ops-btn btn-briefing" title="Generate & Export Hail Threat Briefing">
+        <i class="fa-solid fa-file-shield text-cyan"></i> <span>Briefing</span>
+      </button>
+
+      <!-- Voice Speech Toggle -->
+      <button id="voice-btn" class="ops-btn btn-voice" title="Toggle Spoken Voice Alerts">
+        <i class="fa-solid fa-comment-dots" id="voice-icon"></i> <span>Voice: OFF</span>
+      </button>
+
       <!-- Audio Alarm Control -->
       <div class="alarm-controls">
         <button id="alarm-toggle-btn" class="ops-btn btn-alarm active" title="Toggle Audio Siren on High Threat">
@@ -105,13 +115,23 @@
         <span id="max-hail-val" class="hail-val">--</span>
       </div>
 
+      <div class="metric-pill hide-mobile" id="eta-pill" style="display: none;">
+        <span class="m-label">APPROACH ETA</span>
+        <span id="eta-val" class="eta-val">--</span>
+      </div>
+
+      <div class="metric-pill hide-mobile">
+        <span class="m-label">HAIL INDEX (HPI)</span>
+        <span id="hpi-val" class="hpi-val">--/100</span>
+      </div>
+
       <div class="metric-pill hide-mobile">
         <span class="m-label">EST. REFLECTIVITY</span>
         <span id="dbz-val" class="dbz-val">-- dBZ</span>
       </div>
 
       <div class="metric-pill hide-mobile">
-        <span class="m-label">NEXT AUTO-REFRESH</span>
+        <span class="m-label">NEXT REFRESH</span>
         <span id="countdown-val" class="timer-val">60s</span>
       </div>
     </div>
@@ -146,35 +166,143 @@
           <button id="radar-next-btn" class="hud-btn" title="Step Forward Frame">
             <i class="fa-solid fa-forward-step"></i>
           </button>
+
+          <button id="radar-sweep-btn" class="hud-btn active" title="Toggle Real-Time 360° Doppler Radar Sweep Beam">
+            <i class="fa-solid fa-arrows-spin text-green"></i> <span id="sweep-btn-label">Sweep: ON</span>
+          </button>
         </div>
 
         <div class="hud-layers-bar">
-          <!-- Opacity Slider -->
-          <div class="hud-opacity-slider">
-            <i class="fa-solid fa-circle-half-stroke" title="Radar Opacity"></i>
-            <input type="range" id="radar-opacity" min="10" max="100" value="75" title="Radar Opacity">
-            <span id="opacity-label">75%</span>
+          <!-- Basemap & Radar Source Selectors -->
+          <div class="hud-selectors-wrap">
+            <div class="hud-select-pill" title="Choose Tactical Basemap">
+              <i class="fa-solid fa-layer-group text-cyan"></i>
+              <select id="basemap-select">
+                <option value="dark" selected>Tactical Dark</option>
+                <option value="satellite">Satellite Hybrid</option>
+                <option value="streets">Clean Streets</option>
+              </select>
+            </div>
+
+            <div class="hud-select-pill" title="Choose Live Radar Source">
+              <i class="fa-solid fa-satellite-dish text-green"></i>
+              <select id="radar-source-select">
+                <option value="single_site" selected>Single-Site Localized (WSR-88D)</option>
+                <option value="rainviewer">RainViewer Animated Loop</option>
+                <option value="mrms">NOAA MRMS 1-km 3D (National)</option>
+                <option value="iem">IEM NEXRAD Super-Res Mosaic</option>
+              </select>
+            </div>
+
+            <!-- Localized Radar Station Selector (WSR-88D Single-Site) -->
+            <div class="hud-select-pill" id="radar-station-pill" title="Active Localized WSR-88D Doppler Station">
+              <i class="fa-solid fa-tower-broadcast text-cyan"></i>
+              <select id="radar-station-select">
+                <option value="auto">🎯 Auto-Nearest Radar</option>
+              </select>
+            </div>
+
+            <!-- Radar Convective Color Palette (for RainViewer Loop) -->
+            <div class="hud-select-pill" id="radar-palette-pill" title="Radar Convective Color Palette">
+              <i class="fa-solid fa-palette text-amber"></i>
+              <select id="radar-palette-select">
+                <option value="6" selected>NEXRAD Level III (NOAA Severe)</option>
+                <option value="8">Dark Sky (High Contrast)</option>
+                <option value="2">Universal Blue (Classic)</option>
+                <option value="3">TITAN Severe Storm (Hail Focus)</option>
+                <option value="4">Deep Convective (TWC)</option>
+                <option value="1">Original Rainbow</option>
+              </select>
+            </div>
+
+            <!-- Radar Pixel Smoothing Mode -->
+            <div class="hud-select-pill" id="radar-smoothing-pill" title="Radar Gate Resolution / Smoothing">
+              <i class="fa-solid fa-wand-magic-sparkles text-purple"></i>
+              <select id="radar-smooth-select">
+                <option value="smooth" selected>HD Smooth (Interpolated)</option>
+                <option value="crisp">Raw Crisp Bins (Storm Chaser)</option>
+              </select>
+            </div>
+
+            <!-- Opacity Slider -->
+            <div class="hud-opacity-slider">
+              <i class="fa-solid fa-circle-half-stroke" title="Radar Opacity"></i>
+              <input type="range" id="radar-opacity" min="10" max="100" value="75" title="Radar Opacity">
+              <span id="opacity-label">75%</span>
+            </div>
           </div>
 
-          <!-- Layer Toggles -->
-          <div class="hud-toggles">
-            <label class="toggle-pill" title="Toggle active NWS warnings polygons">
-              <input type="checkbox" id="toggle-polygons" checked>
-              <span>NWS Warnings</span>
-            </label>
-            <label class="toggle-pill" title="Toggle mPING and Spotter hail reports">
-              <input type="checkbox" id="toggle-reports" checked>
-              <span>mPING / LSR</span>
-            </label>
-            <label class="toggle-pill" title="Toggle 5, 15, 30-mile hail warning rings">
-              <input type="checkbox" id="toggle-rings" checked>
-              <span>Threat Rings</span>
-            </label>
-            <label class="toggle-pill" title="Toggle High-Res IEM NEXRAD Base Reflectivity">
-              <input type="checkbox" id="toggle-nexrad-base">
-              <span>IEM NEXRAD</span>
-            </label>
+          <!-- Report Query Filters (Radius & Window) -->
+          <div class="hud-query-filters">
+            <div class="hud-select-pill filter-pill" title="Storm Report Search Radius">
+              <i class="fa-solid fa-arrows-to-dot text-amber"></i>
+              <select id="filter-radius">
+                <option value="15">15 mi radius</option>
+                <option value="30">30 mi radius</option>
+                <option value="45" selected>45 mi radius</option>
+                <option value="75">75 mi radius</option>
+                <option value="120">120 mi radius</option>
+              </select>
+            </div>
+
+            <div class="hud-select-pill filter-pill" title="Ground Reports Time Horizon">
+              <i class="fa-solid fa-clock-rotate-left text-purple"></i>
+              <select id="filter-hours">
+                <option value="6">Past 6 Hours</option>
+                <option value="24">Past 24 Hours</option>
+                <option value="72">Past 3 Days</option>
+                <option value="168" selected>Past 7 Days</option>
+              </select>
+            </div>
           </div>
+        </div>
+
+        <!-- Modernized Overlays Layer Toggles -->
+        <div class="hud-toggles-bar">
+          <label class="toggle-pill pill-weather" title="Toggle Reported City Weather Card on Map">
+            <input type="checkbox" id="toggle-city-weather" checked>
+            <span><i class="fa-solid fa-cloud-sun text-cyan"></i> City Weather</span>
+          </label>
+          <label class="toggle-pill pill-tor" title="Toggle active NWS Tornado and Severe Thunderstorm Warnings">
+            <input type="checkbox" id="toggle-polygons" checked>
+            <span><i class="fa-solid fa-triangle-exclamation"></i> Severe & Tor Warnings</span>
+          </label>
+          <label class="toggle-pill pill-flood" title="Toggle NWS Flash Flood Warnings">
+            <input type="checkbox" id="toggle-floods" checked>
+            <span><i class="fa-solid fa-water"></i> Flood Warnings</span>
+          </label>
+          <label class="toggle-pill pill-advisory" title="Toggle Special Weather Statements & Hail Advisories">
+            <input type="checkbox" id="toggle-advisories" checked>
+            <span><i class="fa-solid fa-bullhorn"></i> Statements / Advisories</span>
+          </label>
+          <label class="toggle-pill pill-watch" title="Toggle Severe Thunderstorm and Tornado Watches">
+            <input type="checkbox" id="toggle-watches" checked>
+            <span><i class="fa-solid fa-eye"></i> Watches</span>
+          </label>
+          <label class="toggle-pill pill-tracks" title="Toggle Storm Motion Vector, Trajectory Swath, and Target ETA">
+            <input type="checkbox" id="toggle-tracks" checked>
+            <span><i class="fa-solid fa-location-arrow"></i> Storm Track & ETA</span>
+          </label>
+          <label class="toggle-pill pill-spc" title="Toggle NOAA Storm Prediction Center (SPC) Day 1 Convective Outlook">
+            <input type="checkbox" id="toggle-spc">
+            <span><i class="fa-solid fa-shield-halved"></i> SPC Outlook</span>
+          </label>
+          <label class="toggle-pill pill-reports" title="Toggle mPING and NWS Spotter verified ground hail reports">
+            <input type="checkbox" id="toggle-reports" checked>
+            <span><i class="fa-solid fa-users"></i> mPING / Spotters</span>
+          </label>
+          <label class="toggle-pill pill-rings" title="Toggle 5, 15, 30-mile hail threat perimeter rings">
+            <input type="checkbox" id="toggle-rings" checked>
+            <span><i class="fa-solid fa-bullseye"></i> Threat Rings</span>
+          </label>
+          <label class="toggle-pill pill-sweep" title="Toggle Real-Time 360° Doppler Radar Sweep Beam">
+            <input type="checkbox" id="toggle-sweep" checked>
+            <span><i class="fa-solid fa-arrows-spin text-green"></i> Radar Sweep</span>
+          </label>
+          <label class="toggle-pill pill-radar-site" title="Toggle Localized NEXRAD Station Tower Marker & 124 nmi Range Rings">
+            <input type="checkbox" id="toggle-radar-site" checked>
+            <span><i class="fa-solid fa-tower-broadcast text-cyan"></i> Station & Rings</span>
+          </label>
         </div>
       </div>
 
@@ -202,9 +330,72 @@
         </div>
       </div>
 
+      <!-- Floating Current City Weather Card (Toggleable) -->
+      <div class="city-weather-card" id="city-weather-card">
+        <div class="weather-card-header">
+          <div class="weather-city-info">
+            <div class="weather-city-name" id="cw-city-name">Dallas, TX</div>
+            <div class="weather-condition-sub">
+              <i class="fa-solid fa-cloud-sun text-cyan" id="cw-condition-icon"></i>
+              <span id="cw-condition-desc">Loading Weather...</span>
+            </div>
+          </div>
+          <div class="weather-card-actions">
+            <span class="cw-badge badge-none" id="cw-threat-badge">NO HAIL</span>
+            <button class="weather-close-btn" id="close-weather-card-btn" title="Close Weather Box (Toggle in bottom bar to reopen)">
+              <i class="fa-solid fa-xmark"></i>
+            </button>
+          </div>
+        </div>
+
+        <div class="weather-main-row">
+          <div class="weather-temp-block">
+            <span class="weather-temp-val" id="cw-temp-f">--°</span>
+            <span class="weather-temp-unit">F</span>
+            <span class="weather-temp-c" id="cw-temp-c">--°C</span>
+          </div>
+          <div class="weather-hpi-block">
+            <div class="weather-stat-label">HAIL POTENTIAL</div>
+            <div class="weather-stat-value text-amber" id="cw-hpi-val">--/100</div>
+          </div>
+        </div>
+
+        <div class="weather-metrics-grid">
+          <div class="w-metric-item" title="Surface Wind Speed & Direction">
+            <span class="w-label"><i class="fa-solid fa-wind text-cyan"></i> Wind</span>
+            <span class="w-val" id="cw-wind">--</span>
+          </div>
+          <div class="w-metric-item" title="Barometric Surface Pressure">
+            <span class="w-label"><i class="fa-solid fa-gauge text-blue"></i> Barometer</span>
+            <span class="w-val" id="cw-pressure">--</span>
+          </div>
+          <div class="w-metric-item" title="Relative Humidity">
+            <span class="w-label"><i class="fa-solid fa-droplet text-blue"></i> Humidity</span>
+            <span class="w-val" id="cw-humidity">--</span>
+          </div>
+          <div class="w-metric-item" title="Precipitation Rate">
+            <span class="w-label"><i class="fa-solid fa-cloud-rain text-cyan"></i> Rain Rate</span>
+            <span class="w-val" id="cw-precip">--</span>
+          </div>
+          <div class="w-metric-item" title="Freezing Level / Hail Survival Factor">
+            <span class="w-label"><i class="fa-solid fa-temperature-arrow-down text-purple"></i> Freezing Lvl</span>
+            <span class="w-val" id="cw-freezing">--</span>
+          </div>
+          <div class="w-metric-item" title="Convective Available Potential Energy">
+            <span class="w-label"><i class="fa-solid fa-bolt text-amber"></i> CAPE Energy</span>
+            <span class="w-val" id="cw-cape">--</span>
+          </div>
+        </div>
+
+        <div class="weather-footer">
+          <span class="weather-coords-sub" id="cw-coords">32.777° N, 96.797° W</span>
+          <span class="weather-updated-sub" id="cw-updated">Connecting...</span>
+        </div>
+      </div>
+
       <!-- Map Hint Notice -->
       <div class="map-interactive-hint">
-        <i class="fa-solid fa-computer-mouse"></i> Click anywhere on map to inspect hail threat at that coordinate
+        <i class="fa-solid fa-computer-mouse"></i> Double-click map to set target inspection location
       </div>
     </div>
 
@@ -257,7 +448,7 @@
           <!-- Source 2: mPING & LSR Ground Reports -->
           <div class="matrix-cell" id="matrix-mping">
             <div class="cell-head">
-              <span class="source-name"><i class="fa-solid fa-users text-cyan"></i> mPING / LSR Reports</span>
+              <span class="source-name" title="mPING & Local Storm Reports (LSR)"><i class="fa-solid fa-users text-cyan"></i> mPING Reports</span>
               <span class="source-status" id="mping-status">CHECKING</span>
             </div>
             <div class="cell-body">
@@ -295,7 +486,7 @@
           <!-- Source 4: Open-Meteo Convective Sounding -->
           <div class="matrix-cell" id="matrix-convective">
             <div class="cell-head">
-              <span class="source-name"><i class="fa-solid fa-volcano text-purple"></i> Atmospheric Sounding</span>
+              <span class="source-name" title="Atmospheric Convective Sounding"><i class="fa-solid fa-volcano text-purple"></i> Sounding / CAPE</span>
               <span class="source-status" id="convective-status">ONLINE</span>
             </div>
             <div class="cell-body">
@@ -313,11 +504,60 @@
         </div>
       </div>
 
-      <!-- CARD 3: HAIL SIZE VISUAL COMPARISON & DAMAGE RISKS -->
+      <!-- CARD 3: THERMODYNAMIC & CONVECTIVE SOUNDING BAROMETER -->
+      <div class="intel-card">
+        <div class="card-eyebrow">
+          <i class="fa-solid fa-gauge-high"></i>
+          <span>ATMOSPHERIC CONVECTIVE BAROMETER</span>
+          <span class="badge-free" id="sounding-hpi-badge">HPI: --</span>
+        </div>
+
+        <div class="sounding-barometer-grid">
+          <!-- CAPE Gauge -->
+          <div class="gauge-wrap">
+            <div class="gauge-head">
+              <span class="g-title"><i class="fa-solid fa-fire-flame-curved text-amber"></i> CAPE Energy</span>
+              <span class="g-val" id="gauge-cape-val">-- J/kg</span>
+            </div>
+            <div class="gauge-bar-track">
+              <div class="gauge-bar-fill" id="gauge-cape-bar" style="width: 0%;"></div>
+            </div>
+            <div class="gauge-sub" id="gauge-cape-desc">Atmospheric buoyancy potential</div>
+          </div>
+
+          <!-- CIN / Cap Status -->
+          <div class="gauge-metric-row">
+            <div class="metric-mini">
+              <span class="mm-label">CIN / CAP STATUS</span>
+              <span class="mm-val" id="gauge-cin-status">Scanning...</span>
+            </div>
+            <div class="metric-mini">
+              <span class="mm-label">LIFTED INDEX</span>
+              <span class="mm-val" id="gauge-li-val">--</span>
+            </div>
+          </div>
+
+          <!-- Freezing Level & Pressure -->
+          <div class="gauge-metric-row">
+            <div class="metric-mini">
+              <span class="mm-label">FREEZING LEVEL (AGL)</span>
+              <span class="mm-val" id="gauge-fz-val">-- ft</span>
+              <span class="mm-sub" id="gauge-fz-sub">Hail survival factor</span>
+            </div>
+            <div class="metric-mini">
+              <span class="mm-label">PRESSURE & GUSTS</span>
+              <span class="mm-val" id="gauge-press-val">-- inHg</span>
+              <span class="mm-sub" id="gauge-gusts-val">Gusts: -- mph</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- CARD 4: HAIL SIZE VISUAL COMPARISON & DAMAGE SIMULATOR -->
       <div class="intel-card">
         <div class="card-eyebrow">
           <i class="fa-solid fa-scale-balanced"></i>
-          <span>HAIL DIAMETER & DAMAGE IMPACT SCALE</span>
+          <span>HAIL DIAMETER & PROPERTY DAMAGE SIMULATOR</span>
         </div>
 
         <div class="hail-scale-display">
@@ -332,6 +572,16 @@
             </div>
           </div>
 
+          <!-- Interactive Simulator Slider -->
+          <div class="sim-slider-wrap">
+            <div class="sim-slider-header">
+              <span><i class="fa-solid fa-sliders"></i> SIMULATE HAIL SIZE:</span>
+              <span id="sim-slider-val" class="text-amber">Live Detection</span>
+              <button id="sim-reset-btn" class="sim-reset-link" title="Reset to detected hail">Reset to Live</button>
+            </div>
+            <input type="range" id="sim-hail-slider" min="0" max="4.5" step="0.25" value="0">
+          </div>
+
           <div class="damage-risk-meter">
             <div class="risk-col">
               <span class="r-icon"><i class="fa-solid fa-car-side"></i></span>
@@ -344,15 +594,28 @@
               <span class="r-status" id="risk-roof">LOW</span>
             </div>
             <div class="risk-col">
+              <span class="r-icon"><i class="fa-solid fa-solar-panel"></i></span>
+              <span class="r-name">Solar & Glass</span>
+              <span class="r-status" id="risk-solar">LOW</span>
+            </div>
+            <div class="risk-col">
               <span class="r-icon"><i class="fa-solid fa-person"></i></span>
               <span class="r-name">Outdoor Safety</span>
               <span class="r-status" id="risk-human">SAFE</span>
             </div>
           </div>
+
+          <!-- Actionable Checklist -->
+          <div class="protective-checklist" id="protective-checklist">
+            <div class="checklist-header"><i class="fa-solid fa-list-check text-cyan"></i> Recommended Protection:</div>
+            <ul id="checklist-items">
+              <li>Conditions safe. No vehicle or property movement required.</li>
+            </ul>
+          </div>
         </div>
       </div>
 
-      <!-- CARD 4: RECENT GROUND REPORTS & BULLETINS FEED -->
+      <!-- CARD 5: RECENT GROUND REPORTS & BULLETINS FEED -->
       <div class="intel-card flex-grow-card">
         <div class="card-eyebrow">
           <i class="fa-solid fa-list-check"></i>
@@ -362,20 +625,42 @@
         <div class="feed-tabs">
           <button class="feed-tab active" data-tab="all">All</button>
           <button class="feed-tab" data-tab="mping">mPING</button>
-          <button class="feed-tab" data-tab="spotter">NWS Spotters</button>
+          <button class="feed-tab" data-tab="spotter">Spotters</button>
           <button class="feed-tab" data-tab="alerts">NWS Warnings</button>
+          <button class="feed-tab" data-tab="watches">Watches</button>
         </div>
 
         <div id="intel-feed-list" class="intel-feed-list">
           <div class="empty-feed">
             <i class="fa-solid fa-check-double text-green"></i>
-            <p>No recent hail reports or severe alerts within the 45-mile monitoring perimeter.</p>
+            <p>No recent hail reports or severe alerts within perimeter.</p>
           </div>
         </div>
       </div>
 
     </aside>
   </main>
+
+  <!-- EXPORT THREAT BRIEFING MODAL -->
+  <div id="briefing-modal" class="modal-backdrop" style="display: none;">
+    <div class="modal-card">
+      <div class="modal-header">
+        <div class="modal-title">
+          <i class="fa-solid fa-shield-halved text-cyan"></i>
+          <span>HAIL THREAT OPERATIONS BRIEFING</span>
+        </div>
+        <button id="close-briefing-btn" class="modal-close-btn">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="briefing-actions">
+          <button id="copy-briefing-btn" class="ops-btn btn-primary"><i class="fa-solid fa-copy"></i> Copy Text</button>
+          <button id="download-briefing-btn" class="ops-btn btn-secondary"><i class="fa-solid fa-download"></i> Download Report</button>
+          <button id="json-briefing-btn" class="ops-btn btn-secondary"><i class="fa-solid fa-code"></i> Copy JSON</button>
+        </div>
+        <textarea id="briefing-content" readonly class="briefing-textarea"></textarea>
+      </div>
+    </div>
+  </div>
 
   <!-- Leaflet & JS Libs -->
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>

@@ -18,6 +18,10 @@ from hail_core import (
     perform_full_assessment,
     fetch_active_national_hotspots,
     fetch_rainviewer_radar,
+    fetch_active_nws_warnings,
+    fetch_spc_day1_outlook,
+    load_nexrad_stations,
+    find_nearest_nexrad,
     USER_AGENT,
     SSL_CTX
 )
@@ -42,10 +46,16 @@ class HailWarnRequestHandler(SimpleHTTPRequestHandler):
         # API Endpoints
         if path == '/api/assess':
             self.handle_assess(query)
+        elif path == '/api/nws/warnings':
+            self.handle_nws_warnings(query)
+        elif path == '/api/spc/outlook':
+            self.handle_spc_outlook()
         elif path == '/api/hotspots':
             self.handle_hotspots()
         elif path == '/api/radar':
             self.handle_radar()
+        elif path == '/api/nexrad/stations':
+            self.handle_nexrad_stations(query)
         elif path == '/api/search':
             self.handle_search(query)
         elif path == '/api/reverse-geocode':
@@ -73,16 +83,45 @@ class HailWarnRequestHandler(SimpleHTTPRequestHandler):
             lat = float(query.get('lat', [None])[0])
             lon = float(query.get('lon', [None])[0])
             radius = float(query.get('radius', [45])[0])
+            hours = int(query.get('hours', [168])[0])
         except (TypeError, ValueError):
             self.send_json_response({'error': 'Invalid coordinates provided. Required: ?lat=...&lon=...'}, 400)
             return
 
         try:
-            result = perform_full_assessment(lat, lon, radius_miles=radius)
+            result = perform_full_assessment(lat, lon, radius_miles=radius, hours=hours)
             self.send_json_response(result)
         except Exception as e:
             print(f"[Server Error] Assessment failed for {lat}, {lon}: {e}")
             self.send_json_response({'error': 'Assessment failure', 'details': str(e)}, 500)
+
+    def handle_nws_warnings(self, query):
+        lat = None
+        lon = None
+        radius = 250
+        try:
+            if 'lat' in query and 'lon' in query:
+                lat = float(query['lat'][0])
+                lon = float(query['lon'][0])
+            if 'radius' in query:
+                radius = float(query['radius'][0])
+        except (TypeError, ValueError):
+            pass
+
+        try:
+            data = fetch_active_nws_warnings(lat=lat, lon=lon, radius_miles=radius)
+            self.send_json_response(data)
+        except Exception as e:
+            print(f"[Server Error] Active NWS warnings failed: {e}")
+            self.send_json_response({'warnings': [], 'geojson': {'type': 'FeatureCollection', 'features': []}, 'count': 0})
+
+    def handle_spc_outlook(self):
+        try:
+            data = fetch_spc_day1_outlook()
+            self.send_json_response(data)
+        except Exception as e:
+            print(f"[Server Error] SPC outlook failed: {e}")
+            self.send_json_response({'categorical': {'type': 'FeatureCollection', 'features': []}, 'hail': {'type': 'FeatureCollection', 'features': []}})
 
     def handle_hotspots(self):
         try:
@@ -99,6 +138,24 @@ class HailWarnRequestHandler(SimpleHTTPRequestHandler):
         except Exception as e:
             print(f"[Server Error] Radar query failed: {e}")
             self.send_json_response({'host': 'https://tilecache.rainviewer.com', 'frames': []})
+
+    def handle_nexrad_stations(self, query):
+        lat = None
+        lon = None
+        try:
+            if 'lat' in query and 'lon' in query:
+                lat = float(query['lat'][0])
+                lon = float(query['lon'][0])
+        except (TypeError, ValueError):
+            pass
+
+        stations = load_nexrad_stations()
+        nearest = find_nearest_nexrad(lat, lon) if lat is not None and lon is not None else None
+        self.send_json_response({
+            'stations': stations,
+            'nearest': nearest,
+            'count': len(stations)
+        })
 
     def handle_search(self, query):
         q = query.get('q', [''])[0].strip()
@@ -131,17 +188,47 @@ class HailWarnRequestHandler(SimpleHTTPRequestHandler):
             lat = float(query.get('lat', [None])[0])
             lon = float(query.get('lon', [None])[0])
         except (TypeError, ValueError):
-            self.send_json_response({'display_name': 'Selected Coordinate'})
+            self.send_json_response({'display_name': 'Selected Coordinate', 'clean_name': 'Selected Coordinate'})
             return
 
-        url = f"https://nominatim.openstreetmap.org/reverse?lat={lat:.4f}&lon={lon:.4f}&format=json"
+        url = f"https://nominatim.openstreetmap.org/reverse?lat={lat:.4f}&lon={lon:.4f}&format=json&addressdetails=1"
         req = urllib.request.Request(url, headers={'User-Agent': USER_AGENT})
         try:
             with urllib.request.urlopen(req, timeout=6, context=SSL_CTX) as resp:
                 data = json.loads(resp.read().decode('utf-8'))
-                self.send_json_response({'display_name': data.get('display_name', f"{lat:.3f}, {lon:.3f}")})
+                addr = data.get('address', {})
+                city = (
+                    addr.get('city') or
+                    addr.get('town') or
+                    addr.get('village') or
+                    addr.get('municipality') or
+                    addr.get('hamlet') or
+                    addr.get('county') or
+                    data.get('name')
+                )
+                state = addr.get('state') or addr.get('country')
+                if city and state:
+                    clean_name = f"{city}, {state}"
+                elif city:
+                    clean_name = city
+                elif data.get('display_name'):
+                    clean_name = ", ".join(data.get('display_name').split(",")[:2])
+                else:
+                    clean_name = f"{lat:.3f}, {lon:.3f}"
+
+                self.send_json_response({
+                    'display_name': data.get('display_name', f"{lat:.3f}, {lon:.3f}"),
+                    'clean_name': clean_name,
+                    'city': city or clean_name,
+                    'state': state or ''
+                })
         except Exception:
-            self.send_json_response({'display_name': f"{lat:.3f}, {lon:.3f}"})
+            self.send_json_response({
+                'display_name': f"{lat:.3f}, {lon:.3f}",
+                'clean_name': f"{lat:.3f}, {lon:.3f}",
+                'city': f"{lat:.3f}, {lon:.3f}",
+                'state': ''
+            })
 
     def log_message(self, format, *args):
         # Clean terminal logging
