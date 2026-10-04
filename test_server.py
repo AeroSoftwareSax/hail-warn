@@ -14,6 +14,7 @@ import time
 import json
 import urllib.request
 import urllib.error
+import urllib.parse
 import warnings
 import socket
 import csv
@@ -203,7 +204,9 @@ def mock_urlopen(req, *args, **kwargs):
         return MockResponse(json.dumps(mock_data).encode('utf-8'))
 
     # SPC Convective Outlooks
-    if "spc.noaa.gov" in url:
+    parsed_url = urllib.parse.urlparse(url)
+    host = parsed_url.hostname or ""
+    if host == "spc.noaa.gov" or host.endswith(".spc.noaa.gov"):
         mock_data = {
             "type": "FeatureCollection",
             "features": [{
