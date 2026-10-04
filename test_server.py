@@ -188,7 +188,9 @@ def mock_urlopen(req, *args, **kwargs):
         return MockResponse(json.dumps(mock_data).encode('utf-8'))
 
     # RainViewer radar metadata
-    if "api.rainviewer.com" in url:
+    parsed_url = urllib.parse.urlparse(url)
+    host = parsed_url.hostname or ""
+    if host == "api.rainviewer.com" or host.endswith(".api.rainviewer.com"):
         mock_data = {
             "host": "https://tilecache.rainviewer.com",
             "radar": {
