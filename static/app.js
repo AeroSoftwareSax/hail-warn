@@ -5,6 +5,18 @@
  * Zero API keys required - 100% free open data.
  */
 
+// HTML sanitization helper for XSS prevention (SEC-02)
+function escapeHtml(str) {
+  if (str === null || str === undefined) return "";
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;")
+    .replace(/`/g, "&#96;");
+}
+
 // Application State
 const state = {
   currentLat: 32.7767, // Default: Dallas, TX
@@ -36,7 +48,16 @@ const state = {
   cityWeatherVisible: true,
   simulatedHail: null,
   activeFeedTab: "all",
-  assessmentData: null
+  assessmentData: null,
+  thresholdConfig: {
+    minHail: 1.0,
+    minScore: 70,
+    maxEta: 45
+  },
+  thresholdTriggered: false,
+  corridorMode: false,
+  corridorLayer: null,
+  corridorData: null
 };
 
 // Global Map and Layer Groups
@@ -367,10 +388,12 @@ function renderLocalizedRadarStation() {
   const lon = st.lon;
 
   // Radar tower beacon icon
+  const distTitle = st.distance_miles !== undefined ? ` (${escapeHtml(st.distance_miles)} mi)` : "";
+  const beaconTitle = `${escapeHtml(st.icao)} - ${escapeHtml(st.name)} WSR-88D${distTitle}`;
   const towerIcon = L.divIcon({
     className: "custom-radar-tower-icon",
     html: `
-      <div class="radar-tower-beacon" title="${st.icao} - ${st.name} WSR-88D (${st.distance_miles !== undefined ? st.distance_miles + ' mi' : ''})">
+      <div class="radar-tower-beacon" title="${beaconTitle}">
         <i class="fa-solid fa-tower-broadcast"></i>
         <div class="beacon-wave"></div>
       </div>
@@ -382,22 +405,30 @@ function renderLocalizedRadarStation() {
   const marker = L.marker([lat, lon], { icon: towerIcon, zIndexOffset: 2000 });
   const popupHtml = `
     <div class="radar-station-popup">
-      <h4><i class="fa-solid fa-tower-broadcast"></i> ${st.icao} &bull; ${st.name}</h4>
+      <h4><i class="fa-solid fa-tower-broadcast"></i> ${escapeHtml(st.icao)} &bull; ${escapeHtml(st.name)}</h4>
       <div class="station-meta">
         <div><b>Type:</b> NOAA WSR-88D Doppler Radar</div>
-        <div><b>Location:</b> ${st.name}, ${st.state}</div>
+        <div><b>Location:</b> ${escapeHtml(st.name)}, ${escapeHtml(st.state)}</div>
         <div><b>Coordinates:</b> ${lat.toFixed(4)}°, ${lon.toFixed(4)}°</div>
-        <div><b>Elevation:</b> ${st.elevation} m MSL</div>
-        ${st.distance_miles !== undefined ? `<div><b>Distance:</b> ${st.distance_miles} miles to target</div>` : ""}
+        <div><b>Elevation:</b> ${escapeHtml(st.elevation)} m MSL</div>
+        ${st.distance_miles !== undefined ? `<div><b>Distance:</b> ${escapeHtml(st.distance_miles)} miles to target</div>` : ""}
       </div>
       <div class="station-badge">Level-III 0.5° Base Reflectivity</div>
-      <button class="hud-btn" style="margin-top: 8px; width: 100%; justify-content: center; font-size: 0.75rem; padding: 5px 8px; background: rgba(6,182,212,0.18); border: 1px solid rgba(6,182,212,0.5); cursor: pointer;" onclick="map.flyTo([${lat}, ${lon}], 9, { duration: 1.2 })">
+      <button id="btn-center-radar-${escapeHtml(st.id)}" class="hud-btn" style="margin-top: 8px; width: 100%; justify-content: center; font-size: 0.75rem; padding: 5px 8px; background: rgba(6,182,212,0.18); border: 1px solid rgba(6,182,212,0.5); cursor: pointer;">
         <i class="fa-solid fa-crosshairs text-cyan"></i> <span>Center On Radar Tower</span>
       </button>
     </div>
   `;
   marker.bindPopup(popupHtml);
-  marker.bindTooltip(`<b>${st.icao}</b> - ${st.name} WSR-88D`, { direction: "top", offset: [0, -10] });
+  marker.on('popupopen', () => {
+    const centerBtn = document.getElementById(`btn-center-radar-${st.id}`);
+    if (centerBtn) {
+      centerBtn.onclick = () => {
+        if (map) map.flyTo([lat, lon], 9, { duration: 1.2 });
+      };
+    }
+  });
+  marker.bindTooltip(`<b>${escapeHtml(st.icao)}</b> - ${escapeHtml(st.name)} WSR-88D`, { direction: "top", offset: [0, -10] });
   radarStationMarkerGroup.addLayer(marker);
 
   // Range rings: 50 km (27 nmi), 100 km (54 nmi), 230 km (124 nmi)
@@ -422,7 +453,7 @@ function renderLocalizedRadarStation() {
     const labelMarker = L.marker([lat + latOffset, lon], {
       icon: L.divIcon({
         className: "radar-range-ring-label",
-        html: `<span>${st.icao} ${r.label}</span>`,
+        html: `<span>${escapeHtml(st.icao)} ${escapeHtml(r.label)}</span>`,
         iconAnchor: [50, 8]
       }),
       interactive: false
@@ -460,6 +491,7 @@ function toggleRadarSweep(enabled) {
 document.addEventListener("DOMContentLoaded", () => {
   initMap();
   initEventListeners();
+  updateActiveRuleBadge();
   loadLiveHotspots();
   loadNexradStations().then(() => {
     switchRadarSource(state.radarSource);
@@ -858,7 +890,7 @@ function renderSearchResults(results) {
   const dropdown = document.getElementById("search-dropdown");
   dropdown.innerHTML = "";
 
-  if (!results || results.length === 0) {
+  if (!Array.isArray(results) || results.length === 0) {
     dropdown.innerHTML = `<div class="search-dropdown-item text-dim">No locations found</div>`;
     dropdown.style.display = "block";
     return;
@@ -867,7 +899,7 @@ function renderSearchResults(results) {
   results.forEach((item) => {
     const el = document.createElement("div");
     el.className = "search-dropdown-item";
-    el.innerHTML = `<i class="fa-solid fa-location-dot text-cyan"></i> <span>${item.display_name}</span>`;
+    el.innerHTML = `<i class="fa-solid fa-location-dot text-cyan"></i> <span>${escapeHtml(item.display_name)}</span>`;
     el.addEventListener("click", () => {
       state.currentLat = item.lat;
       state.currentLon = item.lon;
@@ -906,10 +938,10 @@ async function loadLiveHotspots() {
       item.className = "hotspot-item";
       item.innerHTML = `
         <div>
-          <div class="hotspot-area">${h.area}</div>
-          <div class="hotspot-event">${h.event}</div>
+          <div class="hotspot-area">${escapeHtml(h.area)}</div>
+          <div class="hotspot-event">${escapeHtml(h.event)}</div>
         </div>
-        <div class="hotspot-tag">${h.hail_label || "Hail Risk"}</div>
+        <div class="hotspot-tag">${escapeHtml(h.hail_label || "Hail Risk")}</div>
       `;
       item.addEventListener("click", () => {
         state.currentLat = h.latitude;
@@ -941,6 +973,10 @@ async function refreshAssessment() {
     const url = `/api/assess?lat=${state.currentLat}&lon=${state.currentLon}&radius=${state.radiusMiles}&hours=${state.filterHours}`;
     const res = await fetch(url);
     const data = await res.json();
+    if (!res.ok || data.error || !data.assessment) {
+      console.warn("Assessment API error response:", data?.error || res.statusText);
+      return;
+    }
     state.assessmentData = data;
 
     renderThreatAssessment(data);
@@ -966,13 +1002,41 @@ async function refreshAssessment() {
 
     await loadRainViewerRadar();
 
-    // High threat alarm notification
-    const level = data.assessment.level;
-    if ((level === "WARNING" || level === "EMERGENCY") && level !== state.threatLevel) {
-      playWarningSiren(4.5);
-      speakAlert(`Hail warning alert for ${state.currentPlaceName}. Projected hail diameter: ${data.assessment.max_hail_label}. Take protective shelter immediately.`);
+    // High threat alarm notification gated by custom thresholds (FEAT-01)
+    const level = data.assessment?.level || "NONE";
+    try {
+      const thRes = await fetch(
+        `/api/threat/threshold-check?lat=${state.currentLat}&lon=${state.currentLon}&min_hail=${state.thresholdConfig.minHail}&min_score=${state.thresholdConfig.minScore}&max_eta=${state.thresholdConfig.maxEta}&radius=${state.radiusMiles}`
+      );
+      if (thRes.ok) {
+        const thData = await thRes.json();
+        const triggered = !!thData.evaluation?.triggered;
+        if (triggered && (!state.thresholdTriggered || level !== state.threatLevel)) {
+          playWarningSiren(4.5);
+          speakAlert(
+            `Hail threat alert for ${state.currentPlaceName}. ${thData.directive || 'Take protective shelter immediately.'}`
+          );
+        }
+        state.thresholdTriggered = triggered;
+      } else {
+        // Fallback threshold gating
+        const hailMet = (data.assessment?.max_hail_inches || 0) >= state.thresholdConfig.minHail;
+        const scoreMet = (data.assessment?.score || 0) >= state.thresholdConfig.minScore;
+        if ((hailMet || scoreMet) && level !== state.threatLevel) {
+          playWarningSiren(4.5);
+          speakAlert(`Hail warning alert for ${state.currentPlaceName}. Projected hail diameter: ${data.assessment?.max_hail_label || 'Severe hail'}. Take protective shelter immediately.`);
+        }
+      }
+    } catch (e) {
+      const hailMet = (data.assessment?.max_hail_inches || 0) >= state.thresholdConfig.minHail;
+      const scoreMet = (data.assessment?.score || 0) >= state.thresholdConfig.minScore;
+      if ((hailMet || scoreMet) && level !== state.threatLevel) {
+        playWarningSiren(4.5);
+        speakAlert(`Hail warning alert for ${state.currentPlaceName}. Projected hail diameter: ${data.assessment?.max_hail_label || 'Severe hail'}. Take protective shelter immediately.`);
+      }
     }
     state.threatLevel = level;
+    updateActiveRuleBadge();
 
   } catch (err) {
     console.error("Assessment fetch error:", err);
@@ -1078,7 +1142,7 @@ function renderWarningOverlays(data) {
     if (!isVisible) return;
 
     const s = w.style || {};
-    const color = s.color || "#f59e0b";
+    const color = (s.color && /^#[0-9a-fA-F]{3,8}$/.test(s.color)) ? s.color : "#f59e0b";
 
     const layer = L.geoJSON(w.geometry, {
       style: {
@@ -1115,50 +1179,53 @@ function renderWarningOverlays(data) {
     const hailTag = w.hail_label || (w.hail_size_in ? `${w.hail_size_in.toFixed(2)}" Hail` : "N/A");
     const windTag = w.wind_gust || "N/A";
     const motion = w.motion;
-    let motionText = "Radar Scan";
+    let motionSafe = "Radar Scan";
     if (motion) {
-      motionText = `Moving ${motion.heading_deg}° at ${motion.speed_mph} mph`;
+      motionSafe = `Moving ${escapeHtml(motion.heading_deg)}° at ${escapeHtml(motion.speed_mph)} mph`;
       if (motion.eta_mins !== null && motion.eta_mins !== undefined) {
-        motionText += ` &bull; <b style="color:var(--color-magenta);">ETA ~${motion.eta_mins} mins</b>`;
+        motionSafe += ` &bull; <b style="color:var(--color-magenta);">ETA ~${escapeHtml(motion.eta_mins)} mins</b>`;
         if (nearestApproachingEta === null || motion.eta_mins < nearestApproachingEta) {
           nearestApproachingEta = motion.eta_mins;
         }
       }
     }
 
+    const directiveRaw = w.instruction || w.headline || (w.description ? w.description.slice(0, 160) + '...' : 'Monitor local conditions.');
+    const directiveSafe = escapeHtml(directiveRaw);
+
     layer.bindPopup(`
       <div class="nws-popup-card">
         <div class="nws-popup-top">
           <div class="nws-event-name" style="color: ${color};">
             <span class="nws-pulse-dot" style="background: ${color};"></span>
-            ${w.event}
+            ${escapeHtml(w.event)}
           </div>
-          <span style="font-size: 0.68rem; color: var(--text-dim); font-family: var(--font-mono);">${w.wfo || 'NWS'}</span>
+          <span style="font-size: 0.68rem; color: var(--text-dim); font-family: var(--font-mono);">${escapeHtml(w.wfo || 'NWS')}</span>
         </div>
 
         <div class="nws-badge-row">
           <span class="nws-tag-pill" style="color: var(--color-amber);">
-            <i class="fa-solid fa-cloud-meatball"></i> HAIL: ${hailTag}
+            <i class="fa-solid fa-cloud-meatball"></i> HAIL: ${escapeHtml(hailTag)}
           </span>
           <span class="nws-tag-pill" style="color: var(--color-cyan);">
-            <i class="fa-solid fa-wind"></i> WIND: ${windTag}
+            <i class="fa-solid fa-wind"></i> WIND: ${escapeHtml(windTag)}
           </span>
           ${w.tornado_detection ? `
             <span class="nws-tag-pill" style="color: var(--color-red);">
-              <i class="fa-solid fa-tornado"></i> ${w.tornado_detection}
+              <i class="fa-solid fa-tornado"></i> ${escapeHtml(w.tornado_detection)}
             </span>
           ` : ''}
         </div>
 
         <div class="nws-meta-row">
-          <div><b>Timing:</b> ${expiresText}</div>
-          <div><b>Distance:</b> ${w.distance_miles !== null ? w.distance_miles + ' mi from target' : 'In affected zone'}</div>
-          <div><b>Motion:</b> ${motionText}</div>
+          <div><b>Timing:</b> ${escapeHtml(expiresText)}</div>
+          <div><b>Distance:</b> ${w.distance_miles !== null && w.distance_miles !== undefined ? escapeHtml(w.distance_miles) + ' mi from target' : 'In affected zone'}</div>
+          <div><b>Motion:</b> ${motionSafe}</div>
         </div>
 
         <div class="nws-instruction-box">
           <i class="fa-solid fa-triangle-exclamation"></i>
-          <b>DIRECTIVE:</b> ${w.instruction || w.headline || w.description.slice(0, 160) + '...'}
+          <b>DIRECTIVE:</b> ${directiveSafe}
         </div>
       </div>
     `);
@@ -1186,7 +1253,7 @@ function renderWarningOverlays(data) {
         fillColor: "#ffffff",
         fillOpacity: 0.9,
         weight: 2
-      }).addTo(stormTracksGroup).bindTooltip(`Storm Core (${motion.speed_mph} mph)`);
+      }).addTo(stormTracksGroup).bindTooltip(`Storm Core (${escapeHtml(motion.speed_mph)} mph)`);
 
       // 15, 30, 45-min forecast projection pins
       motion.projected_path.forEach((p) => {
@@ -1197,7 +1264,7 @@ function renderWarningOverlays(data) {
           fillOpacity: 0.8,
           weight: 1
         }).addTo(stormTracksGroup);
-        pin.bindTooltip(`+${p.minutes}m Projected Position`);
+        pin.bindTooltip(`+${escapeHtml(p.minutes)}m Projected Position`);
       });
 
       // Target ETA connector if storm is moving toward user
@@ -1207,7 +1274,7 @@ function renderWarningOverlays(data) {
           weight: 2,
           dashArray: "3, 6",
           opacity: 0.9
-        }).addTo(stormTracksGroup).bindTooltip(`Projected Path to Target: ETA ~${motion.eta_mins}m`);
+        }).addTo(stormTracksGroup).bindTooltip(`Projected Path to Target: ETA ~${escapeHtml(motion.eta_mins)}m`);
       }
     }
   });
@@ -1239,7 +1306,9 @@ function renderWarningOverlays(data) {
       },
       onEachFeature: function(feature, layer) {
         const p = feature.properties || {};
-        layer.bindTooltip(`<b>SPC Day 1 Outlook:</b> ${p.LABEL || ''} - ${p.LABEL2 || 'Convective Risk'}`);
+        const safeLabel = escapeHtml(p.LABEL || "");
+        const safeLabel2 = escapeHtml(p.LABEL2 || "Convective Risk");
+        layer.bindTooltip(`<b>SPC Day 1 Outlook:</b> ${safeLabel} - ${safeLabel2}`);
       }
     });
     spcOutlookGroup.addLayer(spcLayer);
@@ -1253,8 +1322,9 @@ function renderGroundReports(reports) {
   groundReportsGroup.clearLayers();
   if (!document.getElementById("toggle-reports")?.checked) return;
 
-  reports.forEach((r) => {
-    const size = r.hail_size_in || 0;
+  (Array.isArray(reports) ? reports : []).forEach((r) => {
+    const rawSize = r.hail_size_in;
+    const size = typeof rawSize === 'number' && !isNaN(rawSize) ? rawSize : (parseFloat(rawSize) || 0.0);
     let color = "#10b981";
     let radius = 10;
 
@@ -1281,21 +1351,27 @@ function renderGroundReports(reports) {
     });
 
     const marker = L.marker([r.latitude, r.longitude], { icon: markerIcon });
+    const srcTypeEsc = escapeHtml(r.source_type || "Observer");
+    const hailDescEsc = escapeHtml(r.hail_description || "Hail");
+    const distMiEsc = r.distance_miles !== null && r.distance_miles !== undefined ? escapeHtml(r.distance_miles) : "N/A";
+    const obsTimeEsc = escapeHtml(r.age_hours !== null && r.age_hours !== undefined && r.age_hours < 24 ? r.age_hours + 'h ago' : (r.valid || ''));
+    const remarkEsc = escapeHtml(r.remark || '');
+
     marker.bindPopup(`
       <div style="font-family: var(--font-sans); min-width: 200px;">
         <div style="font-weight: 700; color: ${color}; font-size: 0.88rem; margin-bottom: 4px;">
-          <i class="fa-solid fa-users"></i> ${r.source_type}
+          <i class="fa-solid fa-users"></i> ${srcTypeEsc}
         </div>
         <div style="font-family: var(--font-mono); font-size: 0.8rem; margin-bottom: 4px;">
-          <b>HAIL:</b> <span style="color: var(--color-amber);">${r.hail_description}</span>
+          <b>HAIL:</b> <span style="color: var(--color-amber);">${hailDescEsc}</span>
         </div>
         <div style="font-size: 0.72rem; color: #94a3b8; margin-bottom: 2px;">
-          <b>Distance:</b> ${r.distance_miles} miles away
+          <b>Distance:</b> ${distMiEsc} miles away
         </div>
         <div style="font-size: 0.72rem; color: #94a3b8; margin-bottom: 6px;">
-          <b>Observed:</b> ${r.age_hours < 24 ? r.age_hours + 'h ago' : r.valid}
+          <b>Observed:</b> ${obsTimeEsc}
         </div>
-        ${r.remark ? `<div style="font-size: 0.7rem; color: #cbd5e1; font-style: italic; background: rgba(0,0,0,0.3); padding: 4px 6px; border-radius: 4px;">"${r.remark}"</div>` : ''}
+        ${remarkEsc ? `<div style="font-size: 0.7rem; color: #cbd5e1; font-style: italic; background: rgba(0,0,0,0.3); padding: 4px 6px; border-radius: 4px;">"${remarkEsc}"</div>` : ''}
       </div>
     `);
 
@@ -1372,6 +1448,9 @@ function showRadarFrame(index, host) {
 }
 
 function playRadarLoop() {
+  if (!state.radarFrames || state.radarFrames.length === 0) {
+    return;
+  }
   if (state.radarPlaying) {
     clearInterval(state.radarTimer);
     state.radarPlaying = false;
@@ -1380,6 +1459,12 @@ function playRadarLoop() {
     state.radarPlaying = true;
     document.getElementById("play-btn-icon").className = "fa-solid fa-pause";
     state.radarTimer = setInterval(() => {
+      if (!state.radarFrames || state.radarFrames.length === 0) {
+        clearInterval(state.radarTimer);
+        state.radarPlaying = false;
+        document.getElementById("play-btn-icon").className = "fa-solid fa-play";
+        return;
+      }
       state.radarIndex = (state.radarIndex + 1) % state.radarFrames.length;
       showRadarFrame(state.radarIndex);
     }, 700);
@@ -1810,14 +1895,14 @@ function renderIntelFeed(alerts, reports, regWarnings = []) {
     el.className = "feed-item";
     el.innerHTML = `
       <div class="feed-head">
-        <span class="feed-source ${item.type === 'alert' ? 'nws' : (item.type === 'watch' ? 'watch' : '')}">${item.source}</span>
-        <span class="feed-time">${item.time}</span>
+        <span class="feed-source ${item.type === 'alert' ? 'nws' : (item.type === 'watch' ? 'watch' : '')}">${escapeHtml(item.source)}</span>
+        <span class="feed-time">${escapeHtml(item.time)}</span>
       </div>
       <div class="feed-body">
-        <span>${item.title}</span>
-        <span class="feed-hail-tag">${item.tag}</span>
+        <span>${escapeHtml(item.title)}</span>
+        <span class="feed-hail-tag">${escapeHtml(item.tag)}</span>
       </div>
-      <div class="feed-remark">"${item.remark}"</div>
+      <div class="feed-remark">"${escapeHtml(item.remark)}"</div>
     `;
     container.appendChild(el);
   });
@@ -2135,16 +2220,26 @@ function initEventListeners() {
     });
   }
 
-  // Threat Briefing Modal Controls
+  // Threat Briefing Modal Controls (FEAT-03: Export Engine)
   const briefingBtn = document.getElementById("briefing-btn");
   const briefingModal = document.getElementById("briefing-modal");
   const closeBriefingBtn = document.getElementById("close-briefing-btn");
   const briefingContent = document.getElementById("briefing-content");
 
   if (briefingBtn && briefingModal) {
-    briefingBtn.addEventListener("click", () => {
-      if (briefingContent) briefingContent.value = generateBriefingText();
+    briefingBtn.addEventListener("click", async () => {
       briefingModal.style.display = "flex";
+      try {
+        const res = await fetch(`/api/export/threat-dossier?lat=${state.currentLat}&lon=${state.currentLon}&radius=${state.radiusMiles}&format=text`);
+        if (res.ok) {
+          const text = await res.text();
+          if (briefingContent) briefingContent.value = text;
+        } else if (briefingContent) {
+          briefingContent.value = generateBriefingText();
+        }
+      } catch (e) {
+        if (briefingContent) briefingContent.value = generateBriefingText();
+      }
     });
   }
 
@@ -2154,29 +2249,171 @@ function initEventListeners() {
     });
   }
 
-  document.getElementById("copy-briefing-btn")?.addEventListener("click", () => {
-    const text = generateBriefingText();
-    navigator.clipboard.writeText(text);
+  document.getElementById("copy-briefing-btn")?.addEventListener("click", async () => {
     const btn = document.getElementById("copy-briefing-btn");
-    btn.innerHTML = `<i class="fa-solid fa-check"></i> Copied!`;
-    setTimeout(() => { btn.innerHTML = `<i class="fa-solid fa-copy"></i> Copy Text`; }, 2000);
+    try {
+      const res = await fetch(`/api/export/threat-dossier?lat=${state.currentLat}&lon=${state.currentLon}&radius=${state.radiusMiles}&format=text`);
+      const text = res.ok ? await res.text() : generateBriefingText();
+      if (briefingContent) briefingContent.value = text;
+      await navigator.clipboard.writeText(text);
+      if (btn) {
+        btn.innerHTML = `<i class="fa-solid fa-check"></i> Copied Brief!`;
+        setTimeout(() => { btn.innerHTML = `<i class="fa-solid fa-copy"></i> Copy Operations Brief`; }, 2000);
+      }
+    } catch (e) {
+      const text = generateBriefingText();
+      navigator.clipboard.writeText(text);
+    }
   });
 
   document.getElementById("download-briefing-btn")?.addEventListener("click", () => {
-    const text = generateBriefingText();
-    const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
-    const link = document.createElement("a");
-    link.href = URL.createObjectURL(blob);
-    link.download = `HailWarn_Briefing_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.txt`;
-    link.click();
+    window.location.href = `/api/export/threat-dossier?lat=${state.currentLat}&lon=${state.currentLon}&radius=${state.radiusMiles}&format=text`;
   });
 
-  document.getElementById("json-briefing-btn")?.addEventListener("click", () => {
-    const jsonStr = JSON.stringify(state.assessmentData || {}, null, 2);
-    navigator.clipboard.writeText(jsonStr);
+  document.getElementById("download-csv-btn")?.addEventListener("click", () => {
+    window.location.href = `/api/export/threat-dossier?lat=${state.currentLat}&lon=${state.currentLon}&radius=${state.radiusMiles}&format=csv`;
+  });
+
+  document.getElementById("json-briefing-btn")?.addEventListener("click", async () => {
     const btn = document.getElementById("json-briefing-btn");
-    btn.innerHTML = `<i class="fa-solid fa-check"></i> JSON Copied!`;
-    setTimeout(() => { btn.innerHTML = `<i class="fa-solid fa-code"></i> Copy JSON`; }, 2000);
+    try {
+      const res = await fetch(`/api/export/threat-dossier?lat=${state.currentLat}&lon=${state.currentLon}&radius=${state.radiusMiles}&format=json`);
+      let jsonStr;
+      if (res.ok) {
+        const json = await res.json();
+        jsonStr = JSON.stringify(json, null, 2);
+      } else {
+        jsonStr = JSON.stringify(state.assessmentData || {}, null, 2);
+      }
+      if (briefingContent) briefingContent.value = jsonStr;
+      await navigator.clipboard.writeText(jsonStr);
+      if (btn) {
+        btn.innerHTML = `<i class="fa-solid fa-check"></i> JSON Copied!`;
+        setTimeout(() => { btn.innerHTML = `<i class="fa-solid fa-code"></i> Copy JSON`; }, 2000);
+      }
+    } catch (e) {
+      const jsonStr = JSON.stringify(state.assessmentData || {}, null, 2);
+      navigator.clipboard.writeText(jsonStr);
+    }
+  });
+
+  // Threshold Settings Modal Controls (FEAT-01)
+  const thresholdBtn = document.getElementById("threshold-cfg-btn");
+  const thresholdModal = document.getElementById("threshold-modal");
+  const closeThresholdBtn = document.getElementById("close-threshold-btn");
+  const saveThresholdBtn = document.getElementById("save-threshold-btn");
+  const resetThresholdBtn = document.getElementById("reset-threshold-btn");
+
+  function updateThresholdPreview() {
+    const minHail = parseFloat(document.getElementById("cfg-min-hail")?.value || "1.00");
+    const minScore = parseInt(document.getElementById("cfg-min-score")?.value || "70", 10);
+    const maxEta = parseInt(document.getElementById("cfg-max-eta")?.value || "45", 10);
+    const previewEl = document.getElementById("threshold-preview-text");
+    if (previewEl) {
+      previewEl.textContent = `Siren and voice alerts will trigger only when hail size is ≥ ${minHail.toFixed(2)}" OR Threat Score is ≥ ${minScore}%, with an approaching storm ETA ≤ ${maxEta} mins.`;
+    }
+  }
+
+  ["cfg-min-hail", "cfg-min-score", "cfg-max-eta"].forEach(id => {
+    document.getElementById(id)?.addEventListener("change", updateThresholdPreview);
+  });
+
+  if (thresholdBtn && thresholdModal) {
+    thresholdBtn.addEventListener("click", () => {
+      const hSelect = document.getElementById("cfg-min-hail");
+      const sSelect = document.getElementById("cfg-min-score");
+      const eSelect = document.getElementById("cfg-max-eta");
+      if (hSelect) hSelect.value = state.thresholdConfig.minHail.toFixed(2);
+      if (sSelect) sSelect.value = String(state.thresholdConfig.minScore);
+      if (eSelect) eSelect.value = String(state.thresholdConfig.maxEta);
+      updateThresholdPreview();
+      thresholdModal.style.display = "flex";
+    });
+  }
+
+  if (closeThresholdBtn && thresholdModal) {
+    closeThresholdBtn.addEventListener("click", () => {
+      thresholdModal.style.display = "none";
+    });
+  }
+
+  if (saveThresholdBtn && thresholdModal) {
+    saveThresholdBtn.addEventListener("click", () => {
+      const minHail = parseFloat(document.getElementById("cfg-min-hail")?.value || "1.00");
+      const minScore = parseInt(document.getElementById("cfg-min-score")?.value || "70", 10);
+      const maxEta = parseInt(document.getElementById("cfg-max-eta")?.value || "45", 10);
+      state.thresholdConfig.minHail = minHail;
+      state.thresholdConfig.minScore = minScore;
+      state.thresholdConfig.maxEta = maxEta;
+      updateActiveRuleBadge();
+      thresholdModal.style.display = "none";
+      refreshAssessment();
+    });
+  }
+
+  if (resetThresholdBtn) {
+    resetThresholdBtn.addEventListener("click", () => {
+      state.thresholdConfig.minHail = 1.00;
+      state.thresholdConfig.minScore = 70;
+      state.thresholdConfig.maxEta = 45;
+      const hSelect = document.getElementById("cfg-min-hail");
+      const sSelect = document.getElementById("cfg-min-score");
+      const eSelect = document.getElementById("cfg-max-eta");
+      if (hSelect) hSelect.value = "1.00";
+      if (sSelect) sSelect.value = "70";
+      if (eSelect) eSelect.value = "45";
+      updateThresholdPreview();
+      updateActiveRuleBadge();
+    });
+  }
+
+  // Corridor Scanner Drawer & Preset Controls (FEAT-02)
+  const bboxModeBtn = document.getElementById("btn-bbox-mode");
+  const corridorDrawer = document.getElementById("corridor-drawer");
+  const closeCorridorBtn = document.getElementById("close-corridor-drawer-btn");
+
+  if (bboxModeBtn && corridorDrawer) {
+    bboxModeBtn.addEventListener("click", () => {
+      state.corridorMode = !state.corridorMode;
+      if (state.corridorMode) {
+        bboxModeBtn.classList.add("active");
+        corridorDrawer.style.display = "flex";
+        if (!state.corridorData) {
+          loadCorridorBbox(32.5, -97.6, 35.6, -96.6);
+        }
+      } else {
+        bboxModeBtn.classList.remove("active");
+        corridorDrawer.style.display = "none";
+        if (state.corridorLayer && map) {
+          map.removeLayer(state.corridorLayer);
+          state.corridorLayer = null;
+        }
+      }
+    });
+  }
+
+  if (closeCorridorBtn && corridorDrawer) {
+    closeCorridorBtn.addEventListener("click", () => {
+      state.corridorMode = false;
+      bboxModeBtn?.classList.remove("active");
+      corridorDrawer.style.display = "none";
+      if (state.corridorLayer && map) {
+        map.removeLayer(state.corridorLayer);
+        state.corridorLayer = null;
+      }
+    });
+  }
+
+  document.querySelectorAll(".preset-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const minLat = parseFloat(btn.getAttribute("data-minlat"));
+      const minLon = parseFloat(btn.getAttribute("data-minlon"));
+      const maxLat = parseFloat(btn.getAttribute("data-maxlat"));
+      const maxLon = parseFloat(btn.getAttribute("data-maxlon"));
+      if (!isNaN(minLat) && !isNaN(minLon) && !isNaN(maxLat) && !isNaN(maxLon)) {
+        loadCorridorBbox(minLat, minLon, maxLat, maxLon);
+      }
+    });
   });
 
   // Feed Tabs
@@ -2208,3 +2445,85 @@ function handleTick() {
   const el = document.getElementById("countdown-val");
   if (el) el.textContent = `${state.secondsUntilRefresh}s`;
 }
+
+// -------------------------------------------------------------
+// FEAT-01: ACTIVE RULE BADGE UPDATE
+// -------------------------------------------------------------
+function updateActiveRuleBadge() {
+  const badge = document.getElementById("active-rule-badge");
+  if (badge && state.thresholdConfig) {
+    badge.textContent = `HAIL ≥ ${state.thresholdConfig.minHail.toFixed(2)}" | SCORE ≥ ${state.thresholdConfig.minScore}% | ETA ≤ ${state.thresholdConfig.maxEta}m`;
+  }
+}
+
+// -------------------------------------------------------------
+// FEAT-02: CORRIDOR SCANNER DATA LOADER
+// -------------------------------------------------------------
+async function loadCorridorBbox(minLat, minLon, maxLat, maxLon) {
+  const boundsText = document.getElementById("corridor-bounds-text");
+  const badge = document.getElementById("corridor-status-badge");
+  if (badge) badge.textContent = "SCANNING...";
+  if (boundsText) boundsText.textContent = `Scanning corridor bounds: [${minLat.toFixed(2)}, ${minLon.toFixed(2)}] to [${maxLat.toFixed(2)}, ${maxLon.toFixed(2)}]...`;
+
+  try {
+    const res = await fetch(`/api/hail/bbox?min_lat=${minLat}&min_lon=${minLon}&max_lat=${maxLat}&max_lon=${maxLon}&min_hail=0.0&hours=24`);
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const data = await res.json();
+    state.corridorData = data;
+
+    // Update drawer metrics
+    const metrics = data.corridor_metrics || {};
+    const scoreVal = document.getElementById("corridor-score-val");
+    if (scoreVal) scoreVal.textContent = `${metrics.composite_corridor_score ?? 0}%`;
+
+    const sevVal = document.getElementById("corridor-severity-val");
+    if (sevVal) {
+      sevVal.textContent = escapeHtml(metrics.highest_severity || "NONE");
+      if (metrics.highest_severity === "TORNADO" || metrics.highest_severity === "DESTRUCTIVE_HAIL") {
+        sevVal.className = "cm-val text-red";
+      } else if (metrics.highest_severity === "SEVERE_TSTORM") {
+        sevVal.className = "cm-val text-amber";
+      } else {
+        sevVal.className = "cm-val";
+      }
+    }
+
+    const hailVal = document.getElementById("corridor-maxhail-val");
+    if (hailVal) hailVal.textContent = `${metrics.max_hail_inches ? metrics.max_hail_inches.toFixed(2) + '"' : '--'}`;
+
+    const warnVal = document.getElementById("corridor-warnings-val");
+    if (warnVal) warnVal.textContent = String(metrics.total_warnings || 0);
+
+    const repVal = document.getElementById("corridor-reports-val");
+    if (repVal) repVal.textContent = String(metrics.total_hail_reports || 0);
+
+    if (badge) {
+      badge.textContent = (metrics.composite_corridor_score >= 70) ? "HIGH DANGER" : ((metrics.composite_corridor_score >= 40) ? "ELEVATED" : "LOW RISK");
+    }
+    if (boundsText) {
+      boundsText.textContent = `Corridor bounds: ${minLat.toFixed(2)}°N to ${maxLat.toFixed(2)}°N, ${Math.abs(minLon).toFixed(2)}°W to ${Math.abs(maxLon).toFixed(2)}°W | Max hail: ${escapeHtml(metrics.max_hail_label || 'None')}`;
+    }
+
+    // Render / update corridor bounding box polygon on map
+    if (state.corridorLayer && map) {
+      map.removeLayer(state.corridorLayer);
+      state.corridorLayer = null;
+    }
+    if (map) {
+      const bounds = [[minLat, minLon], [maxLat, maxLon]];
+      state.corridorLayer = L.rectangle(bounds, {
+        color: "#06b6d4",
+        weight: 2.5,
+        dashArray: "6, 6",
+        fillColor: "#06b6d4",
+        fillOpacity: 0.12
+      }).addTo(map);
+      state.corridorLayer.bindTooltip(`Corridor: ${escapeHtml(metrics.highest_severity || 'Active Scan')} (Danger: ${metrics.composite_corridor_score ?? 0}%)`);
+      map.fitBounds(bounds, { padding: [40, 40] });
+    }
+  } catch (err) {
+    console.error("Corridor fetch error:", err);
+    if (boundsText) boundsText.textContent = "Error scanning corridor: " + escapeHtml(err.message);
+  }
+}
+
