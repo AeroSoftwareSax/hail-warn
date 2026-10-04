@@ -413,8 +413,14 @@ class HailWarnRequestHandler(SimpleHTTPRequestHandler):
             self.send_json_response([])
             return
 
-        enc_q = urllib.parse.quote(q)
-        url = f"https://nominatim.openstreetmap.org/search?q={enc_q}&format=json&limit=5&addressdetails=1"
+        base_url = "https://nominatim.openstreetmap.org/search"
+        params = {
+            'q': q,
+            'format': 'json',
+            'limit': '5',
+            'addressdetails': '1'
+        }
+        url = f"{base_url}?{urllib.parse.urlencode(params)}"
         req = urllib.request.Request(url, headers={'User-Agent': USER_AGENT})
         try:
             with urllib.request.urlopen(req, timeout=6, context=SSL_CTX) as resp:  # nosec B310
