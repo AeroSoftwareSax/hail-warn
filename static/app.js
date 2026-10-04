@@ -48,7 +48,16 @@ const state = {
   cityWeatherVisible: true,
   simulatedHail: null,
   activeFeedTab: "all",
-  assessmentData: null
+  assessmentData: null,
+  thresholdConfig: {
+    minHail: 1.0,
+    minScore: 70,
+    maxEta: 45
+  },
+  thresholdTriggered: false,
+  corridorMode: false,
+  corridorLayer: null,
+  corridorData: null
 };
 
 // Global Map and Layer Groups
@@ -482,6 +491,7 @@ function toggleRadarSweep(enabled) {
 document.addEventListener("DOMContentLoaded", () => {
   initMap();
   initEventListeners();
+  updateActiveRuleBadge();
   loadLiveHotspots();
   loadNexradStations().then(() => {
     switchRadarSource(state.radarSource);
@@ -992,13 +1002,41 @@ async function refreshAssessment() {
 
     await loadRainViewerRadar();
 
-    // High threat alarm notification
+    // High threat alarm notification gated by custom thresholds (FEAT-01)
     const level = data.assessment?.level || "NONE";
-    if ((level === "WARNING" || level === "EMERGENCY") && level !== state.threatLevel) {
-      playWarningSiren(4.5);
-      speakAlert(`Hail warning alert for ${state.currentPlaceName}. Projected hail diameter: ${data.assessment?.max_hail_label || 'Severe hail'}. Take protective shelter immediately.`);
+    try {
+      const thRes = await fetch(
+        `/api/threat/threshold-check?lat=${state.currentLat}&lon=${state.currentLon}&min_hail=${state.thresholdConfig.minHail}&min_score=${state.thresholdConfig.minScore}&max_eta=${state.thresholdConfig.maxEta}&radius=${state.radiusMiles}`
+      );
+      if (thRes.ok) {
+        const thData = await thRes.json();
+        const triggered = !!thData.evaluation?.triggered;
+        if (triggered && (!state.thresholdTriggered || level !== state.threatLevel)) {
+          playWarningSiren(4.5);
+          speakAlert(
+            `Hail threat alert for ${state.currentPlaceName}. ${thData.directive || 'Take protective shelter immediately.'}`
+          );
+        }
+        state.thresholdTriggered = triggered;
+      } else {
+        // Fallback threshold gating
+        const hailMet = (data.assessment?.max_hail_inches || 0) >= state.thresholdConfig.minHail;
+        const scoreMet = (data.assessment?.score || 0) >= state.thresholdConfig.minScore;
+        if ((hailMet || scoreMet) && level !== state.threatLevel) {
+          playWarningSiren(4.5);
+          speakAlert(`Hail warning alert for ${state.currentPlaceName}. Projected hail diameter: ${data.assessment?.max_hail_label || 'Severe hail'}. Take protective shelter immediately.`);
+        }
+      }
+    } catch (e) {
+      const hailMet = (data.assessment?.max_hail_inches || 0) >= state.thresholdConfig.minHail;
+      const scoreMet = (data.assessment?.score || 0) >= state.thresholdConfig.minScore;
+      if ((hailMet || scoreMet) && level !== state.threatLevel) {
+        playWarningSiren(4.5);
+        speakAlert(`Hail warning alert for ${state.currentPlaceName}. Projected hail diameter: ${data.assessment?.max_hail_label || 'Severe hail'}. Take protective shelter immediately.`);
+      }
     }
     state.threatLevel = level;
+    updateActiveRuleBadge();
 
   } catch (err) {
     console.error("Assessment fetch error:", err);
@@ -2182,16 +2220,26 @@ function initEventListeners() {
     });
   }
 
-  // Threat Briefing Modal Controls
+  // Threat Briefing Modal Controls (FEAT-03: Export Engine)
   const briefingBtn = document.getElementById("briefing-btn");
   const briefingModal = document.getElementById("briefing-modal");
   const closeBriefingBtn = document.getElementById("close-briefing-btn");
   const briefingContent = document.getElementById("briefing-content");
 
   if (briefingBtn && briefingModal) {
-    briefingBtn.addEventListener("click", () => {
-      if (briefingContent) briefingContent.value = generateBriefingText();
+    briefingBtn.addEventListener("click", async () => {
       briefingModal.style.display = "flex";
+      try {
+        const res = await fetch(`/api/export/threat-dossier?lat=${state.currentLat}&lon=${state.currentLon}&radius=${state.radiusMiles}&format=text`);
+        if (res.ok) {
+          const text = await res.text();
+          if (briefingContent) briefingContent.value = text;
+        } else if (briefingContent) {
+          briefingContent.value = generateBriefingText();
+        }
+      } catch (e) {
+        if (briefingContent) briefingContent.value = generateBriefingText();
+      }
     });
   }
 
@@ -2201,29 +2249,171 @@ function initEventListeners() {
     });
   }
 
-  document.getElementById("copy-briefing-btn")?.addEventListener("click", () => {
-    const text = generateBriefingText();
-    navigator.clipboard.writeText(text);
+  document.getElementById("copy-briefing-btn")?.addEventListener("click", async () => {
     const btn = document.getElementById("copy-briefing-btn");
-    btn.innerHTML = `<i class="fa-solid fa-check"></i> Copied!`;
-    setTimeout(() => { btn.innerHTML = `<i class="fa-solid fa-copy"></i> Copy Text`; }, 2000);
+    try {
+      const res = await fetch(`/api/export/threat-dossier?lat=${state.currentLat}&lon=${state.currentLon}&radius=${state.radiusMiles}&format=text`);
+      const text = res.ok ? await res.text() : generateBriefingText();
+      if (briefingContent) briefingContent.value = text;
+      await navigator.clipboard.writeText(text);
+      if (btn) {
+        btn.innerHTML = `<i class="fa-solid fa-check"></i> Copied Brief!`;
+        setTimeout(() => { btn.innerHTML = `<i class="fa-solid fa-copy"></i> Copy Operations Brief`; }, 2000);
+      }
+    } catch (e) {
+      const text = generateBriefingText();
+      navigator.clipboard.writeText(text);
+    }
   });
 
   document.getElementById("download-briefing-btn")?.addEventListener("click", () => {
-    const text = generateBriefingText();
-    const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
-    const link = document.createElement("a");
-    link.href = URL.createObjectURL(blob);
-    link.download = `HailWarn_Briefing_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.txt`;
-    link.click();
+    window.location.href = `/api/export/threat-dossier?lat=${state.currentLat}&lon=${state.currentLon}&radius=${state.radiusMiles}&format=text`;
   });
 
-  document.getElementById("json-briefing-btn")?.addEventListener("click", () => {
-    const jsonStr = JSON.stringify(state.assessmentData || {}, null, 2);
-    navigator.clipboard.writeText(jsonStr);
+  document.getElementById("download-csv-btn")?.addEventListener("click", () => {
+    window.location.href = `/api/export/threat-dossier?lat=${state.currentLat}&lon=${state.currentLon}&radius=${state.radiusMiles}&format=csv`;
+  });
+
+  document.getElementById("json-briefing-btn")?.addEventListener("click", async () => {
     const btn = document.getElementById("json-briefing-btn");
-    btn.innerHTML = `<i class="fa-solid fa-check"></i> JSON Copied!`;
-    setTimeout(() => { btn.innerHTML = `<i class="fa-solid fa-code"></i> Copy JSON`; }, 2000);
+    try {
+      const res = await fetch(`/api/export/threat-dossier?lat=${state.currentLat}&lon=${state.currentLon}&radius=${state.radiusMiles}&format=json`);
+      let jsonStr;
+      if (res.ok) {
+        const json = await res.json();
+        jsonStr = JSON.stringify(json, null, 2);
+      } else {
+        jsonStr = JSON.stringify(state.assessmentData || {}, null, 2);
+      }
+      if (briefingContent) briefingContent.value = jsonStr;
+      await navigator.clipboard.writeText(jsonStr);
+      if (btn) {
+        btn.innerHTML = `<i class="fa-solid fa-check"></i> JSON Copied!`;
+        setTimeout(() => { btn.innerHTML = `<i class="fa-solid fa-code"></i> Copy JSON`; }, 2000);
+      }
+    } catch (e) {
+      const jsonStr = JSON.stringify(state.assessmentData || {}, null, 2);
+      navigator.clipboard.writeText(jsonStr);
+    }
+  });
+
+  // Threshold Settings Modal Controls (FEAT-01)
+  const thresholdBtn = document.getElementById("threshold-cfg-btn");
+  const thresholdModal = document.getElementById("threshold-modal");
+  const closeThresholdBtn = document.getElementById("close-threshold-btn");
+  const saveThresholdBtn = document.getElementById("save-threshold-btn");
+  const resetThresholdBtn = document.getElementById("reset-threshold-btn");
+
+  function updateThresholdPreview() {
+    const minHail = parseFloat(document.getElementById("cfg-min-hail")?.value || "1.00");
+    const minScore = parseInt(document.getElementById("cfg-min-score")?.value || "70", 10);
+    const maxEta = parseInt(document.getElementById("cfg-max-eta")?.value || "45", 10);
+    const previewEl = document.getElementById("threshold-preview-text");
+    if (previewEl) {
+      previewEl.textContent = `Siren and voice alerts will trigger only when hail size is ≥ ${minHail.toFixed(2)}" OR Threat Score is ≥ ${minScore}%, with an approaching storm ETA ≤ ${maxEta} mins.`;
+    }
+  }
+
+  ["cfg-min-hail", "cfg-min-score", "cfg-max-eta"].forEach(id => {
+    document.getElementById(id)?.addEventListener("change", updateThresholdPreview);
+  });
+
+  if (thresholdBtn && thresholdModal) {
+    thresholdBtn.addEventListener("click", () => {
+      const hSelect = document.getElementById("cfg-min-hail");
+      const sSelect = document.getElementById("cfg-min-score");
+      const eSelect = document.getElementById("cfg-max-eta");
+      if (hSelect) hSelect.value = state.thresholdConfig.minHail.toFixed(2);
+      if (sSelect) sSelect.value = String(state.thresholdConfig.minScore);
+      if (eSelect) eSelect.value = String(state.thresholdConfig.maxEta);
+      updateThresholdPreview();
+      thresholdModal.style.display = "flex";
+    });
+  }
+
+  if (closeThresholdBtn && thresholdModal) {
+    closeThresholdBtn.addEventListener("click", () => {
+      thresholdModal.style.display = "none";
+    });
+  }
+
+  if (saveThresholdBtn && thresholdModal) {
+    saveThresholdBtn.addEventListener("click", () => {
+      const minHail = parseFloat(document.getElementById("cfg-min-hail")?.value || "1.00");
+      const minScore = parseInt(document.getElementById("cfg-min-score")?.value || "70", 10);
+      const maxEta = parseInt(document.getElementById("cfg-max-eta")?.value || "45", 10);
+      state.thresholdConfig.minHail = minHail;
+      state.thresholdConfig.minScore = minScore;
+      state.thresholdConfig.maxEta = maxEta;
+      updateActiveRuleBadge();
+      thresholdModal.style.display = "none";
+      refreshAssessment();
+    });
+  }
+
+  if (resetThresholdBtn) {
+    resetThresholdBtn.addEventListener("click", () => {
+      state.thresholdConfig.minHail = 1.00;
+      state.thresholdConfig.minScore = 70;
+      state.thresholdConfig.maxEta = 45;
+      const hSelect = document.getElementById("cfg-min-hail");
+      const sSelect = document.getElementById("cfg-min-score");
+      const eSelect = document.getElementById("cfg-max-eta");
+      if (hSelect) hSelect.value = "1.00";
+      if (sSelect) sSelect.value = "70";
+      if (eSelect) eSelect.value = "45";
+      updateThresholdPreview();
+      updateActiveRuleBadge();
+    });
+  }
+
+  // Corridor Scanner Drawer & Preset Controls (FEAT-02)
+  const bboxModeBtn = document.getElementById("btn-bbox-mode");
+  const corridorDrawer = document.getElementById("corridor-drawer");
+  const closeCorridorBtn = document.getElementById("close-corridor-drawer-btn");
+
+  if (bboxModeBtn && corridorDrawer) {
+    bboxModeBtn.addEventListener("click", () => {
+      state.corridorMode = !state.corridorMode;
+      if (state.corridorMode) {
+        bboxModeBtn.classList.add("active");
+        corridorDrawer.style.display = "flex";
+        if (!state.corridorData) {
+          loadCorridorBbox(32.5, -97.6, 35.6, -96.6);
+        }
+      } else {
+        bboxModeBtn.classList.remove("active");
+        corridorDrawer.style.display = "none";
+        if (state.corridorLayer && map) {
+          map.removeLayer(state.corridorLayer);
+          state.corridorLayer = null;
+        }
+      }
+    });
+  }
+
+  if (closeCorridorBtn && corridorDrawer) {
+    closeCorridorBtn.addEventListener("click", () => {
+      state.corridorMode = false;
+      bboxModeBtn?.classList.remove("active");
+      corridorDrawer.style.display = "none";
+      if (state.corridorLayer && map) {
+        map.removeLayer(state.corridorLayer);
+        state.corridorLayer = null;
+      }
+    });
+  }
+
+  document.querySelectorAll(".preset-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const minLat = parseFloat(btn.getAttribute("data-minlat"));
+      const minLon = parseFloat(btn.getAttribute("data-minlon"));
+      const maxLat = parseFloat(btn.getAttribute("data-maxlat"));
+      const maxLon = parseFloat(btn.getAttribute("data-maxlon"));
+      if (!isNaN(minLat) && !isNaN(minLon) && !isNaN(maxLat) && !isNaN(maxLon)) {
+        loadCorridorBbox(minLat, minLon, maxLat, maxLon);
+      }
+    });
   });
 
   // Feed Tabs
@@ -2255,3 +2445,85 @@ function handleTick() {
   const el = document.getElementById("countdown-val");
   if (el) el.textContent = `${state.secondsUntilRefresh}s`;
 }
+
+// -------------------------------------------------------------
+// FEAT-01: ACTIVE RULE BADGE UPDATE
+// -------------------------------------------------------------
+function updateActiveRuleBadge() {
+  const badge = document.getElementById("active-rule-badge");
+  if (badge && state.thresholdConfig) {
+    badge.textContent = `HAIL ≥ ${state.thresholdConfig.minHail.toFixed(2)}" | SCORE ≥ ${state.thresholdConfig.minScore}% | ETA ≤ ${state.thresholdConfig.maxEta}m`;
+  }
+}
+
+// -------------------------------------------------------------
+// FEAT-02: CORRIDOR SCANNER DATA LOADER
+// -------------------------------------------------------------
+async function loadCorridorBbox(minLat, minLon, maxLat, maxLon) {
+  const boundsText = document.getElementById("corridor-bounds-text");
+  const badge = document.getElementById("corridor-status-badge");
+  if (badge) badge.textContent = "SCANNING...";
+  if (boundsText) boundsText.textContent = `Scanning corridor bounds: [${minLat.toFixed(2)}, ${minLon.toFixed(2)}] to [${maxLat.toFixed(2)}, ${maxLon.toFixed(2)}]...`;
+
+  try {
+    const res = await fetch(`/api/hail/bbox?min_lat=${minLat}&min_lon=${minLon}&max_lat=${maxLat}&max_lon=${maxLon}&min_hail=0.0&hours=24`);
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const data = await res.json();
+    state.corridorData = data;
+
+    // Update drawer metrics
+    const metrics = data.corridor_metrics || {};
+    const scoreVal = document.getElementById("corridor-score-val");
+    if (scoreVal) scoreVal.textContent = `${metrics.composite_corridor_score ?? 0}%`;
+
+    const sevVal = document.getElementById("corridor-severity-val");
+    if (sevVal) {
+      sevVal.textContent = escapeHtml(metrics.highest_severity || "NONE");
+      if (metrics.highest_severity === "TORNADO" || metrics.highest_severity === "DESTRUCTIVE_HAIL") {
+        sevVal.className = "cm-val text-red";
+      } else if (metrics.highest_severity === "SEVERE_TSTORM") {
+        sevVal.className = "cm-val text-amber";
+      } else {
+        sevVal.className = "cm-val";
+      }
+    }
+
+    const hailVal = document.getElementById("corridor-maxhail-val");
+    if (hailVal) hailVal.textContent = `${metrics.max_hail_inches ? metrics.max_hail_inches.toFixed(2) + '"' : '--'}`;
+
+    const warnVal = document.getElementById("corridor-warnings-val");
+    if (warnVal) warnVal.textContent = String(metrics.total_warnings || 0);
+
+    const repVal = document.getElementById("corridor-reports-val");
+    if (repVal) repVal.textContent = String(metrics.total_hail_reports || 0);
+
+    if (badge) {
+      badge.textContent = (metrics.composite_corridor_score >= 70) ? "HIGH DANGER" : ((metrics.composite_corridor_score >= 40) ? "ELEVATED" : "LOW RISK");
+    }
+    if (boundsText) {
+      boundsText.textContent = `Corridor bounds: ${minLat.toFixed(2)}°N to ${maxLat.toFixed(2)}°N, ${Math.abs(minLon).toFixed(2)}°W to ${Math.abs(maxLon).toFixed(2)}°W | Max hail: ${escapeHtml(metrics.max_hail_label || 'None')}`;
+    }
+
+    // Render / update corridor bounding box polygon on map
+    if (state.corridorLayer && map) {
+      map.removeLayer(state.corridorLayer);
+      state.corridorLayer = null;
+    }
+    if (map) {
+      const bounds = [[minLat, minLon], [maxLat, maxLon]];
+      state.corridorLayer = L.rectangle(bounds, {
+        color: "#06b6d4",
+        weight: 2.5,
+        dashArray: "6, 6",
+        fillColor: "#06b6d4",
+        fillOpacity: 0.12
+      }).addTo(map);
+      state.corridorLayer.bindTooltip(`Corridor: ${escapeHtml(metrics.highest_severity || 'Active Scan')} (Danger: ${metrics.composite_corridor_score ?? 0}%)`);
+      map.fitBounds(bounds, { padding: [40, 40] });
+    }
+  } catch (err) {
+    console.error("Corridor fetch error:", err);
+    if (boundsText) boundsText.textContent = "Error scanning corridor: " + escapeHtml(err.message);
+  }
+}
+

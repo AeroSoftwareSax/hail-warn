@@ -11,6 +11,8 @@ import time
 import datetime
 import json
 import re
+import csv
+import io
 import urllib.request
 import urllib.parse
 import ssl
@@ -1266,3 +1268,525 @@ def perform_full_assessment(lat, lon, radius_miles=45, hours=168):
         'spc_outlook': spc_res,
         'nearest_radar': find_nearest_nexrad(lat, lon)
     }
+
+
+def evaluate_threat_threshold(lat, lon, min_hail=1.0, min_score=70, max_eta=45, radius_miles=45.0):
+    """
+    Evaluates current hail threat metrics against user-configured alert thresholds (FEAT-01).
+    Prevents alert fatigue by validating if approaching severe storm ETA, hail diameter,
+    and composite threat score breach user-specified alarm criteria.
+    """
+    min_hail_f = _safe_float(min_hail, 1.0)
+    min_score_i = int(_safe_float(min_score, 70))
+    max_eta_i = int(_safe_float(max_eta, 45))
+    radius_f = _safe_float(radius_miles, 45.0)
+
+    assessment_data = perform_full_assessment(lat, lon, radius_miles=radius_f)
+    assessment = assessment_data.get('assessment', {}) if isinstance(assessment_data, dict) else {}
+
+    score = _safe_float(assessment.get('score'), 0.0)
+    level = str(assessment.get('level') or 'NONE')
+    max_hail = _safe_float(assessment.get('max_hail_inches'), 0.0)
+    max_hail_label = str(assessment.get('max_hail_label') or describe_hail_size(max_hail))
+
+    # Identify nearest approaching storm ETA and warning proximity
+    nearest_eta = None
+    is_in_warning_zone = False
+
+    regional_res = assessment_data.get('regional_warnings') if isinstance(assessment_data, dict) else {}
+    regional_warnings = regional_res.get('warnings', []) if isinstance(regional_res, dict) else []
+
+    for rw in regional_warnings:
+        if not isinstance(rw, dict):
+            continue
+        dist = rw.get('distance_miles')
+        if dist is not None and _safe_float(dist, 999.0) <= 12.0:
+            is_in_warning_zone = True
+        motion = rw.get('motion')
+        if isinstance(motion, dict) and motion.get('eta_mins') is not None:
+            eta = _safe_float(motion.get('eta_mins'), -1.0)
+            if eta >= 0:
+                if nearest_eta is None or eta < nearest_eta:
+                    nearest_eta = int(round(eta))
+
+    # Check point alerts for direct overhead warning
+    nws_alerts = assessment_data.get('nws_alerts', []) if isinstance(assessment_data, dict) else []
+    for a in nws_alerts:
+        if isinstance(a, dict) and a.get('event'):
+            ev = (a.get('event') or '').lower()
+            if 'severe thunderstorm' in ev or 'tornado' in ev:
+                is_in_warning_zone = True
+
+    hail_met = (max_hail >= min_hail_f)
+    score_met = (score >= min_score_i)
+    eta_met = ((nearest_eta is not None and nearest_eta <= max_eta_i) or is_in_warning_zone)
+
+    matched_reasons = []
+    if hail_met:
+        matched_reasons.append(f"Hail size ({max_hail:.2f}\") meets or exceeds threshold of {min_hail_f:.2f}\"")
+    if score_met:
+        matched_reasons.append(f"Threat score ({int(score)}%) meets or exceeds threshold of {min_score_i}%")
+    if eta_met:
+        if nearest_eta is not None:
+            matched_reasons.append(f"Approaching storm ETA ({nearest_eta} mins) is within alert window of {max_eta_i} mins")
+        else:
+            matched_reasons.append("Target location is within active severe warning zone")
+
+    # Trigger rule: at least one severity threshold met (hail or score) AND ETA is within window (or overhead)
+    # If no storm motion ETA is available, trigger if hail or score met (overhead/in-zone threat)
+    triggered = bool((hail_met or score_met) and (eta_met or nearest_eta is None))
+
+    if triggered:
+        directive = f"CRITICAL ACTION REQUIRED: {max_hail_label} hail threat breached alert threshold (Score: {int(score)}%). Sheltering vehicles and personnel mandatory."
+    else:
+        directive = "MONITORING ACTIVE: Current threat metrics remain within acceptable safety thresholds."
+
+    return {
+        "status": "ok",
+        "timestamp": time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+        "rule_criteria": {
+            "min_hail_inches": float(min_hail_f),
+            "min_threat_score": int(min_score_i),
+            "max_eta_minutes": int(max_eta_i),
+            "radius_miles": float(radius_f)
+        },
+        "current_metrics": {
+            "threat_score": int(score),
+            "threat_level": level,
+            "max_hail_inches": float(max_hail),
+            "max_hail_label": max_hail_label,
+            "nearest_storm_eta_mins": nearest_eta
+        },
+        "evaluation": {
+            "triggered": triggered,
+            "hail_threshold_met": bool(hail_met),
+            "score_threshold_met": bool(score_met),
+            "eta_threshold_met": bool(eta_met),
+            "matched_reasons": matched_reasons
+        },
+        "directive": directive
+    }
+
+
+def is_point_in_bbox(lat, lon, min_lat, min_lon, max_lat, max_lon):
+    """Checks if a point coordinate (lat, lon) is contained in the bounding box."""
+    if lat is None or lon is None:
+        return False
+    try:
+        f_lat = float(lat)
+        f_lon = float(lon)
+        if math.isnan(f_lat) or math.isinf(f_lat) or math.isnan(f_lon) or math.isinf(f_lon):
+            return False
+        return (min_lat <= f_lat <= max_lat) and (min_lon <= f_lon <= max_lon)
+    except (TypeError, ValueError):
+        return False
+
+
+def is_geometry_intersecting_bbox(geom, min_lat, min_lon, max_lat, max_lon):
+    """Checks if a GeoJSON polygon, multipolygon, or point intersects the bounding box."""
+    if not isinstance(geom, dict):
+        return False
+    coords = geom.get('coordinates')
+    gtype = geom.get('type')
+    if not coords or not isinstance(coords, list):
+        return False
+
+    pts = []
+    if gtype == 'Point' and len(coords) >= 2:
+        return is_point_in_bbox(coords[1], coords[0], min_lat, min_lon, max_lat, max_lon)
+    elif gtype == 'Polygon' and coords:
+        pts = coords[0]
+    elif gtype == 'MultiPolygon' and coords and coords[0]:
+        pts = coords[0][0]
+
+    if not pts:
+        return False
+
+    poly_min_lat = 90.0
+    poly_max_lat = -90.0
+    poly_min_lon = 180.0
+    poly_max_lon = -180.0
+
+    for p in pts:
+        if isinstance(p, (list, tuple)) and len(p) >= 2:
+            try:
+                p_lon = float(p[0])
+                p_lat = float(p[1])
+                if is_point_in_bbox(p_lat, p_lon, min_lat, min_lon, max_lat, max_lon):
+                    return True
+                if p_lat < poly_min_lat: poly_min_lat = p_lat
+                if p_lat > poly_max_lat: poly_max_lat = p_lat
+                if p_lon < poly_min_lon: poly_min_lon = p_lon
+                if p_lon > poly_max_lon: poly_max_lon = p_lon
+            except (TypeError, ValueError):
+                continue
+
+    # Bounding box rectangle overlap test
+    overlap = not (
+        poly_max_lat < min_lat or
+        poly_min_lat > max_lat or
+        poly_max_lon < min_lon or
+        poly_min_lon > max_lon
+    )
+    return overlap
+
+
+def scan_hail_bbox(min_lat, min_lon, max_lat, max_lon, min_hail=0.0, hours=24):
+    """
+    Scans a geographic bounding box or highway transit corridor for severe hail threats (FEAT-02).
+    Queries active NWS warnings and IEM LSR hail reports, spatial filters them to the box,
+    and computes aggregated corridor metrics and composite danger score.
+    """
+    min_lat_f = float(min_lat)
+    min_lon_f = float(min_lon)
+    max_lat_f = float(max_lat)
+    max_lon_f = float(max_lon)
+    min_hail_f = _safe_float(min_hail, 0.0)
+    hours_i = max(1, min(720, int(_safe_float(hours, 24))))
+
+    center_lat = (min_lat_f + max_lat_f) / 2.0
+    center_lon = (min_lon_f + max_lon_f) / 2.0
+
+    corners = [
+        (min_lat_f, min_lon_f),
+        (min_lat_f, max_lon_f),
+        (max_lat_f, min_lon_f),
+        (max_lat_f, max_lon_f)
+    ]
+    corner_dists = [haversine_distance(center_lat, center_lon, c_lat, c_lon) for c_lat, c_lon in corners]
+    query_radius = max(corner_dists) + 15.0
+
+    # Fetch active warnings and LSR reports within the enclosing radius
+    warnings_res = fetch_active_nws_warnings(lat=center_lat, lon=center_lon, radius_miles=max(query_radius, 60.0))
+    all_warnings = warnings_res.get('warnings', []) if isinstance(warnings_res, dict) else []
+    all_reports = fetch_iem_lsr_reports(lat=center_lat, lon=center_lon, radius_miles=max(query_radius, 60.0), hours=hours_i)
+
+    contained_warnings = []
+    for w in all_warnings:
+        if not isinstance(w, dict):
+            continue
+        c_lat = w.get('center_lat')
+        c_lon = w.get('center_lon')
+        if c_lat is not None and c_lon is not None and is_point_in_bbox(c_lat, c_lon, min_lat_f, min_lon_f, max_lat_f, max_lon_f):
+            contained_warnings.append(w)
+        elif is_geometry_intersecting_bbox(w.get('geometry'), min_lat_f, min_lon_f, max_lat_f, max_lon_f):
+            contained_warnings.append(w)
+
+    contained_reports = []
+    for r in all_reports:
+        if not isinstance(r, dict):
+            continue
+        r_lat = r.get('latitude')
+        r_lon = r.get('longitude')
+        r_hail = _safe_float(r.get('hail_size_in'), 0.0)
+        if is_point_in_bbox(r_lat, r_lon, min_lat_f, min_lon_f, max_lat_f, max_lon_f) and r_hail >= min_hail_f:
+            contained_reports.append(r)
+
+    # Compute corridor metrics
+    total_warnings = len(contained_warnings)
+    total_hail_reports = len(contained_reports)
+
+    max_hail_inches = 0.0
+    for w in contained_warnings:
+        wh = _safe_float(w.get('hail_size_in'), 0.0)
+        if wh > max_hail_inches:
+            max_hail_inches = wh
+    for r in contained_reports:
+        rh = _safe_float(r.get('hail_size_in'), 0.0)
+        if rh > max_hail_inches:
+            max_hail_inches = rh
+
+    max_hail_label = describe_hail_size(max_hail_inches)
+
+    highest_severity = "NONE"
+    if any(w.get('category') == 'TORNADO' or 'tornado' in (w.get('event') or '').lower() for w in contained_warnings):
+        highest_severity = "TORNADO"
+    elif any(w.get('category') == 'DESTRUCTIVE_HAIL' for w in contained_warnings) or max_hail_inches >= 2.0:
+        highest_severity = "DESTRUCTIVE_HAIL"
+    elif any(w.get('category') == 'SEVERE_TSTORM' for w in contained_warnings) or max_hail_inches >= 1.0:
+        highest_severity = "SEVERE_TSTORM"
+    elif any(w.get('category') == 'WATCH' for w in contained_warnings):
+        highest_severity = "WATCH"
+    elif any(w.get('category') == 'ADVISORY' or w.get('category') == 'FLASH_FLOOD' for w in contained_warnings) or max_hail_inches > 0:
+        highest_severity = "ADVISORY"
+
+    sev_map = {"TORNADO": 85, "DESTRUCTIVE_HAIL": 75, "SEVERE_TSTORM": 60, "WATCH": 35, "ADVISORY": 25, "NONE": 0}
+    base_score = sev_map.get(highest_severity, 0)
+    warn_bonus = min(20, total_warnings * 5)
+    report_bonus = min(20, total_hail_reports * 3)
+    hail_bonus = 15 if max_hail_inches >= 2.0 else (10 if max_hail_inches >= 1.5 else (5 if max_hail_inches >= 1.0 else 0))
+
+    composite_score = max(0, min(100, int(base_score + warn_bonus + report_bonus + hail_bonus)))
+    if highest_severity == "TORNADO":
+        composite_score = max(composite_score, 88)
+    elif highest_severity == "DESTRUCTIVE_HAIL":
+        composite_score = max(composite_score, 75)
+    elif highest_severity == "SEVERE_TSTORM":
+        composite_score = max(composite_score, 60)
+
+    # Build GeoJSON FeatureCollection
+    features = []
+    for w in contained_warnings:
+        features.append({
+            'type': 'Feature',
+            'id': w.get('id'),
+            'geometry': w.get('geometry'),
+            'properties': {
+                'id': w.get('id'),
+                'event': w.get('event'),
+                'category': w.get('category'),
+                'severity': w.get('severity'),
+                'hail_size_in': w.get('hail_size_in'),
+                'hail_label': w.get('hail_label'),
+                'headline': w.get('headline'),
+                'style': w.get('style')
+            }
+        })
+    for r in contained_reports:
+        features.append({
+            'type': 'Feature',
+            'geometry': {
+                'type': 'Point',
+                'coordinates': [r.get('longitude'), r.get('latitude')]
+            },
+            'properties': {
+                'type': 'LSR_REPORT',
+                'source': r.get('source_type'),
+                'hail_size_in': r.get('hail_size_in'),
+                'hail_description': r.get('hail_description'),
+                'valid': r.get('valid'),
+                'city': r.get('city'),
+                'remark': r.get('remark')
+            }
+        })
+
+    return {
+        "status": "ok",
+        "bbox": {
+            "min_lat": min_lat_f,
+            "min_lon": min_lon_f,
+            "max_lat": max_lat_f,
+            "max_lon": max_lon_f
+        },
+        "corridor_metrics": {
+            "total_warnings": total_warnings,
+            "total_hail_reports": total_hail_reports,
+            "max_hail_inches": round(max_hail_inches, 2),
+            "max_hail_label": max_hail_label,
+            "highest_severity": highest_severity,
+            "composite_corridor_score": composite_score
+        },
+        "contained_warnings": contained_warnings,
+        "contained_reports": contained_reports,
+        "geojson": {
+            "type": "FeatureCollection",
+            "features": features
+        }
+    }
+
+
+def generate_threat_dossier(lat, lon, radius_miles=45.0, format_type='text'):
+    """
+    Generates an authoritative Operations Threat Dossier export (FEAT-03).
+    Supports plain text operations briefing, RFC 4180 CSV, and structured JSON.
+    """
+    lat_f = float(lat)
+    lon_f = float(lon)
+    radius_f = _safe_float(radius_miles, 45.0)
+    fmt = str(format_type).lower().strip()
+
+    assessment_data = perform_full_assessment(lat_f, lon_f, radius_miles=radius_f)
+    assessment = assessment_data.get('assessment', {}) if isinstance(assessment_data, dict) else {}
+    nws_alerts = assessment_data.get('nws_alerts', []) if isinstance(assessment_data, dict) else []
+    lsr_reports = assessment_data.get('lsr_reports', []) if isinstance(assessment_data, dict) else []
+    regional_res = assessment_data.get('regional_warnings', {}) if isinstance(assessment_data, dict) else {}
+    regional_warnings = regional_res.get('warnings', []) if isinstance(regional_res, dict) else []
+    convective = assessment_data.get('convective_data', {}) if isinstance(assessment_data, dict) else {}
+
+    timestamp = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+    lat_card = 'N' if lat_f >= 0 else 'S'
+    lon_card = 'E' if lon_f >= 0 else 'W'
+    dossier_id = f"HW-{time.strftime('%Y%m%d', time.gmtime())}-{abs(lat_f):.2f}{lat_card}-{abs(lon_f):.2f}{lon_card}"
+
+    if fmt == 'json':
+        return {
+            "status": "ok",
+            "dossier_id": dossier_id,
+            "timestamp": timestamp,
+            "location": {
+                "latitude": lat_f,
+                "longitude": lon_f,
+                "radius_miles": radius_f
+            },
+            "assessment": assessment,
+            "contained_warnings": regional_warnings,
+            "nws_alerts": nws_alerts,
+            "contained_reports": lsr_reports,
+            "convective_data": convective,
+            "geojson": regional_res.get('geojson', {'type': 'FeatureCollection', 'features': []})
+        }
+
+    elif fmt == 'csv':
+        output = io.StringIO()
+        writer = csv.writer(output, quoting=csv.QUOTE_MINIMAL, lineterminator='\r\n')
+
+        # Section 1: Assessment Key Metrics
+        writer.writerow(["# HAILWARN OPERATIONS THREAT DOSSIER - ASSESSMENT KEY METRICS"])
+        writer.writerow([
+            "Dossier ID", "Timestamp UTC", "Latitude", "Longitude", "Radius Miles",
+            "Threat Score", "Threat Level", "Max Hail Inches", "Max Hail Label",
+            "Estimated dBZ", "CAPE J/kg", "Lifted Index", "CIN J/kg",
+            "Freezing Level Ft", "Hail Potential Index", "Action Recommendation"
+        ])
+        writer.writerow([
+            dossier_id,
+            timestamp,
+            f"{lat_f:.4f}",
+            f"{lon_f:.4f}",
+            f"{radius_f:.1f}",
+            assessment.get('score', 0),
+            assessment.get('level', 'NONE'),
+            assessment.get('max_hail_inches', 0.0),
+            assessment.get('max_hail_label', 'None'),
+            assessment.get('estimated_dbz', 'N/A'),
+            convective.get('cape_j_kg', 'N/A'),
+            convective.get('lifted_index', 'N/A'),
+            convective.get('cin_j_kg', 'N/A'),
+            convective.get('freezing_level_ft', 'N/A'),
+            convective.get('hail_potential_index', 'N/A'),
+            assessment.get('action_recommendation', 'N/A')
+        ])
+        writer.writerow([])
+
+        # Section 2: Detailed Warnings and Reports
+        writer.writerow(["# DETAILED WARNINGS AND GROUND OBSERVATIONS LOG"])
+        writer.writerow([
+            "Record Type", "ID/Source", "Event/Category", "Severity/Threat",
+            "Hail Size Inches", "Hail Description", "Distance Miles", "Valid Time",
+            "Latitude", "Longitude", "Remark/Description"
+        ])
+
+        for w in regional_warnings:
+            writer.writerow([
+                "WARNING",
+                w.get('id', 'N/A'),
+                w.get('event', 'N/A'),
+                w.get('severity', 'N/A'),
+                w.get('hail_size_in') if w.get('hail_size_in') is not None else "0.0",
+                w.get('hail_label', 'N/A'),
+                w.get('distance_miles', 'N/A'),
+                w.get('effective', 'N/A'),
+                w.get('center_lat', 'N/A'),
+                w.get('center_lon', 'N/A'),
+                (w.get('headline') or w.get('description', ''))[:200]
+            ])
+
+        for r in lsr_reports:
+            writer.writerow([
+                "GROUND_REPORT",
+                r.get('source_type', 'Spotter/mPING'),
+                r.get('type', 'HAIL'),
+                "CONFIRMED",
+                r.get('hail_size_in', 0.0),
+                r.get('hail_description', 'N/A'),
+                r.get('distance_miles', 'N/A'),
+                r.get('valid', 'N/A'),
+                r.get('latitude', 'N/A'),
+                r.get('longitude', 'N/A'),
+                r.get('remark', '')
+            ])
+
+        return output.getvalue()
+
+    else:
+        # Default: Formatted ASCII text
+        score = assessment.get('score', 0)
+        level = assessment.get('level', 'NONE')
+        max_hail_in = assessment.get('max_hail_inches', 0.0)
+        max_hail_lbl = assessment.get('max_hail_label', 'None')
+        est_dbz = assessment.get('estimated_dbz', '< 30 dBZ')
+        rec = assessment.get('action_recommendation', 'No action required.')
+        reasons = assessment.get('reasons', ['Clear skies or stable conditions.'])
+
+        cape = convective.get('cape_j_kg', 'N/A')
+        li = convective.get('lifted_index', 'N/A')
+        cin = convective.get('cin_j_kg', 'N/A')
+        cin_status = convective.get('cin_cap_status', 'Unknown')
+        fz_ft = convective.get('freezing_level_ft', 'N/A')
+        fz_factor = convective.get('hail_survival_factor', 'Standard')
+        hpi = convective.get('hail_potential_index', 'N/A')
+
+        reasons_txt = "\n".join(f"  * {r}" for r in reasons)
+
+        warnings_txt = ""
+        if regional_warnings:
+            warnings_txt = "\n".join(
+                f"  [{w.get('severity', 'Severe').upper()}] {w.get('event', 'Warning')} - Hail: {w.get('hail_size_in', 'N/A')}\" "
+                f"(Distance: {w.get('distance_miles', 'N/A')} mi) | {w.get('headline', '')}"
+                for w in regional_warnings[:10]
+            )
+        else:
+            warnings_txt = "  No active NWS warnings currently in perimeter."
+
+        reports_txt = ""
+        if lsr_reports:
+            reports_txt = "\n".join(
+                f"  * {r.get('source_type', 'Observer')}: {r.get('hail_description', 'Hail')} at {r.get('city', 'Area')}, {r.get('state', '')} "
+                f"({r.get('distance_miles', 'N/A')} mi away) - {r.get('remark', '')}"
+                for r in lsr_reports[:10]
+            )
+        else:
+            reports_txt = "  No ground truth hail reports filed in time horizon."
+
+        return f"""================================================================================
+HAILWARN SEVERE WEATHER OPERATIONS THREAT DOSSIER
+================================================================================
+DOSSIER ID:      {dossier_id}
+GENERATED (UTC): {timestamp}
+COORDINATES:     {abs(lat_f):.4f}° {lat_card}, {abs(lon_f):.4f}° {lon_card}
+SEARCH RADIUS:   {radius_f:.1f} statute miles
+--------------------------------------------------------------------------------
+1. EXECUTIVE THREAT ASSESSMENT
+--------------------------------------------------------------------------------
+HAIL RISK SCORE:         {score}%
+THREAT SEVERITY LEVEL:   {level}
+MAX HAIL DIAMETER:       {max_hail_in:.2f}" ({max_hail_lbl})
+EST. RADAR REFLECTIVITY: {est_dbz}
+
+OPERATIONAL DIRECTIVE:
+>> {rec}
+
+EVALUATION REASONS:
+{reasons_txt}
+
+--------------------------------------------------------------------------------
+2. ACTIVE NWS WARNING BULLETINS ({len(regional_warnings)})
+--------------------------------------------------------------------------------
+{warnings_txt}
+
+--------------------------------------------------------------------------------
+3. VERIFIED GROUND TRUTH OBSERVATIONS ({len(lsr_reports)})
+--------------------------------------------------------------------------------
+{reports_txt}
+
+--------------------------------------------------------------------------------
+4. ATMOSPHERIC CONVECTIVE SOUNDING PROFILE
+--------------------------------------------------------------------------------
+CAPE ENERGY:          {cape} J/kg
+LIFTED INDEX:         {li}
+CONVECTIVE CAP (CIN): {cin} J/kg ({cin_status})
+FREEZING LEVEL (AGL): {fz_ft} ft ({fz_factor})
+HAIL POTENTIAL INDEX: {hpi}/100
+
+--------------------------------------------------------------------------------
+5. PROTECTIVE ACTION CHECKLIST
+--------------------------------------------------------------------------------
+[ ] Alert operations dispatch and mobile ground units
+[ ] Secure open vehicle inventory, fleet assets, and aircraft in hangars
+[ ] Close high-exposure skylights and protect solar array installations
+[ ] Direct personnel indoors away from exterior glass & structural openings
+================================================================================
+END OF OPERATIONS DOSSIER - HAILWARN RAPID RESPONSE ENGINE
+================================================================================
+"""
+

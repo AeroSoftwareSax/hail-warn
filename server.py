@@ -24,6 +24,9 @@ from hail_core import (
     fetch_spc_day1_outlook,
     load_nexrad_stations,
     find_nearest_nexrad,
+    evaluate_threat_threshold,
+    scan_hail_bbox,
+    generate_threat_dossier,
     USER_AGENT,
     SSL_CTX
 )
@@ -78,6 +81,78 @@ def validate_hours(hours_raw, default=168):
         raise ValueError(f"Hours out of bounds [1, 720]: {h}")
     return h
 
+def validate_bbox(min_lat_raw, min_lon_raw, max_lat_raw, max_lon_raw):
+    """Validate bounding box coordinate boundaries.
+    Ensures -90 <= min_lat < max_lat <= 90 and -180 <= min_lon < max_lon <= 180.
+    Rejects NaN, Inf, and non-numeric values.
+    """
+    if min_lat_raw is None or min_lon_raw is None or max_lat_raw is None or max_lon_raw is None:
+        raise ValueError("All bounding box parameters (min_lat, min_lon, max_lat, max_lon) are required.")
+    try:
+        min_lat = float(min_lat_raw)
+        min_lon = float(min_lon_raw)
+        max_lat = float(max_lat_raw)
+        max_lon = float(max_lon_raw)
+    except (TypeError, ValueError):
+        raise ValueError("Bounding box coordinates must be valid decimal numbers.")
+    if math.isnan(min_lat) or math.isinf(min_lat) or math.isnan(min_lon) or math.isinf(min_lon) or \
+       math.isnan(max_lat) or math.isinf(max_lat) or math.isnan(max_lon) or math.isinf(max_lon):
+        raise ValueError("Bounding box coordinates cannot be NaN or infinite.")
+    if not (-90.0 <= min_lat <= 90.0):
+        raise ValueError(f"min_lat out of bounds [-90, 90]: {min_lat}")
+    if not (-90.0 <= max_lat <= 90.0):
+        raise ValueError(f"max_lat out of bounds [-90, 90]: {max_lat}")
+    if min_lat >= max_lat:
+        raise ValueError(f"min_lat ({min_lat}) must be strictly less than max_lat ({max_lat}).")
+    if not (-180.0 <= min_lon <= 180.0):
+        raise ValueError(f"min_lon out of bounds [-180, 180]: {min_lon}")
+    if not (-180.0 <= max_lon <= 180.0):
+        raise ValueError(f"max_lon out of bounds [-180, 180]: {max_lon}")
+    if min_lon >= max_lon:
+        raise ValueError(f"min_lon ({min_lon}) must be strictly less than max_lon ({max_lon}).")
+    return min_lat, min_lon, max_lat, max_lon
+
+def validate_min_hail(min_hail_raw, default=0.0):
+    if min_hail_raw is None:
+        return default
+    try:
+        val = float(min_hail_raw)
+    except (TypeError, ValueError):
+        raise ValueError("min_hail must be a valid decimal number.")
+    if math.isnan(val) or math.isinf(val) or val < 0.0 or val > 10.0:
+        raise ValueError(f"min_hail out of bounds [0.0, 10.0]: {val}")
+    return val
+
+def validate_min_score(min_score_raw, default=70):
+    if min_score_raw is None:
+        return default
+    try:
+        val = int(min_score_raw)
+    except (TypeError, ValueError):
+        raise ValueError("min_score must be a valid integer.")
+    if val < 0 or val > 100:
+        raise ValueError(f"min_score out of bounds [0, 100]: {val}")
+    return val
+
+def validate_max_eta(max_eta_raw, default=45):
+    if max_eta_raw is None:
+        return default
+    try:
+        val = int(max_eta_raw)
+    except (TypeError, ValueError):
+        raise ValueError("max_eta must be a valid integer.")
+    if val < 1 or val > 360:
+        raise ValueError(f"max_eta out of bounds [1, 360]: {val}")
+    return val
+
+def validate_export_format(format_raw, default='text'):
+    if format_raw is None:
+        return default
+    fmt = str(format_raw).strip().lower()
+    if fmt not in ('text', 'csv', 'json'):
+        raise ValueError(f"Invalid format '{fmt}'. Supported formats are 'text', 'csv', and 'json'.")
+    return fmt
+
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
     """Handle requests in separate threads for maximum throughput."""
     daemon_threads = True
@@ -110,6 +185,12 @@ class HailWarnRequestHandler(SimpleHTTPRequestHandler):
             self.handle_search(query)
         elif path == '/api/reverse-geocode':
             self.handle_reverse_geocode(query)
+        elif path == '/api/threat/threshold-check':
+            self.handle_threat_threshold(query)
+        elif path == '/api/hail/bbox':
+            self.handle_hail_bbox(query)
+        elif path == '/api/export/threat-dossier':
+            self.handle_export_threat_dossier(query)
         elif path == '/api/health':
             self.send_json_response({'status': 'ok', 'app': 'HailWarn', 'version': '1.0'})
         else:
@@ -150,6 +231,19 @@ class HailWarnRequestHandler(SimpleHTTPRequestHandler):
         self.send_header('Content-Length', str(len(body)))
         self.send_header('Access-Control-Allow-Origin', '*')
         self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
+        self.end_headers()
+        self.wfile.write(body)
+
+    def send_text_response(self, text, status_code=200, content_type='text/plain; charset=utf-8', headers=None):
+        body = text.encode('utf-8')
+        self.send_response(status_code)
+        self.send_header('Content-Type', content_type)
+        self.send_header('Content-Length', str(len(body)))
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
+        if headers:
+            for k, v in headers.items():
+                self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
 
@@ -401,6 +495,125 @@ class HailWarnRequestHandler(SimpleHTTPRequestHandler):
                 'city': f"{lat:.3f}, {lon:.3f}",
                 'state': ''
             })
+
+    def handle_threat_threshold(self, query):
+        lat_param = get_query_param(query, 'lat')
+        lon_param = get_query_param(query, 'lon')
+        min_hail_param = get_query_param(query, 'min_hail')
+        min_score_param = get_query_param(query, 'min_score')
+        max_eta_param = get_query_param(query, 'max_eta')
+        radius_param = get_query_param(query, 'radius')
+
+        try:
+            lat, lon = validate_coordinates(lat_param, lon_param)
+            min_hail = validate_min_hail(min_hail_param, default=1.0)
+            min_score = validate_min_score(min_score_param, default=70)
+            max_eta = validate_max_eta(max_eta_param, default=45)
+            radius = validate_radius(radius_param, default=45.0)
+        except ValueError as e:
+            self.send_json_response({'error': str(e)}, 400)
+            return
+
+        try:
+            result = evaluate_threat_threshold(
+                lat=lat,
+                lon=lon,
+                min_hail=min_hail,
+                min_score=min_score,
+                max_eta=max_eta,
+                radius_miles=radius
+            )
+            if not isinstance(result, dict):
+                result = {'status': 'ok', 'evaluation': {'triggered': False}}
+            self.send_json_response(result)
+        except Exception as e:
+            print(f"[Server Error] Threat threshold evaluation failed for {lat}, {lon}: {e}", file=sys.stderr)
+            self.send_json_response({'error': 'Threshold evaluation failure. Please check server logs.'}, 500)
+
+    def handle_hail_bbox(self, query):
+        min_lat_param = get_query_param(query, 'min_lat')
+        min_lon_param = get_query_param(query, 'min_lon')
+        max_lat_param = get_query_param(query, 'max_lat')
+        max_lon_param = get_query_param(query, 'max_lon')
+        min_hail_param = get_query_param(query, 'min_hail')
+        hours_param = get_query_param(query, 'hours')
+
+        try:
+            min_lat, min_lon, max_lat, max_lon = validate_bbox(
+                min_lat_param, min_lon_param, max_lat_param, max_lon_param
+            )
+            min_hail = validate_min_hail(min_hail_param, default=0.0)
+            hours = validate_hours(hours_param, default=24)
+        except ValueError as e:
+            self.send_json_response({'error': str(e)}, 400)
+            return
+
+        try:
+            result = scan_hail_bbox(
+                min_lat=min_lat,
+                min_lon=min_lon,
+                max_lat=max_lat,
+                max_lon=max_lon,
+                min_hail=min_hail,
+                hours=hours
+            )
+            if not isinstance(result, dict):
+                result = {
+                    'status': 'ok',
+                    'bbox': {'min_lat': min_lat, 'min_lon': min_lon, 'max_lat': max_lat, 'max_lon': max_lon},
+                    'corridor_metrics': {'total_warnings': 0, 'total_hail_reports': 0, 'composite_corridor_score': 0},
+                    'contained_warnings': [],
+                    'contained_reports': [],
+                    'geojson': {'type': 'FeatureCollection', 'features': []}
+                }
+            self.send_json_response(result)
+        except Exception as e:
+            print(f"[Server Error] Hail bbox scan failed for [{min_lat}, {min_lon}, {max_lat}, {max_lon}]: {e}", file=sys.stderr)
+            self.send_json_response({'error': 'Bounding box scan failure. Please check server logs.'}, 500)
+
+    def handle_export_threat_dossier(self, query):
+        lat_param = get_query_param(query, 'lat')
+        lon_param = get_query_param(query, 'lon')
+        radius_param = get_query_param(query, 'radius')
+        format_param = get_query_param(query, 'format')
+
+        try:
+            lat, lon = validate_coordinates(lat_param, lon_param)
+            radius = validate_radius(radius_param, default=45.0)
+            export_fmt = validate_export_format(format_param, default='text')
+        except ValueError as e:
+            self.send_json_response({'error': str(e)}, 400)
+            return
+
+        try:
+            result = generate_threat_dossier(
+                lat=lat,
+                lon=lon,
+                radius_miles=radius,
+                format_type=export_fmt
+            )
+            if export_fmt == 'json':
+                if not isinstance(result, dict):
+                    result = {'status': 'ok', 'dossier_id': 'HW-UNKNOWN'}
+                self.send_json_response(result)
+            elif export_fmt == 'csv':
+                ts_str = time.strftime('%Y%m%d_%H%M%S', time.gmtime())
+                filename = f"hailwarn_dossier_{ts_str}.csv"
+                self.send_text_response(
+                    str(result),
+                    status_code=200,
+                    content_type='text/csv; charset=utf-8',
+                    headers={'Content-Disposition': f'attachment; filename="{filename}"'}
+                )
+            else:
+                self.send_text_response(
+                    str(result),
+                    status_code=200,
+                    content_type='text/plain; charset=utf-8'
+                )
+        except Exception as e:
+            print(f"[Server Error] Threat dossier export failed for {lat}, {lon}: {e}", file=sys.stderr)
+            self.send_json_response({'error': 'Threat dossier export failure. Please check server logs.'}, 500)
 
     def log_message(self, format, *args):
         # Clean terminal logging

@@ -16,6 +16,7 @@ import urllib.request
 import urllib.error
 import warnings
 import socket
+import csv
 from server import run_server, HailWarnRequestHandler, ThreadedHTTPServer, STATIC_DIR
 from hail_core import (
     describe_hail_size,
@@ -31,6 +32,11 @@ from hail_core import (
     fetch_active_nws_warnings,
     fetch_active_national_hotspots,
     fetch_spc_day1_outlook,
+    evaluate_threat_threshold,
+    is_point_in_bbox,
+    is_geometry_intersecting_bbox,
+    scan_hail_bbox,
+    generate_threat_dossier,
     SSL_CTX,
     _CACHE,
     _cache_set,
@@ -1006,7 +1012,413 @@ class TestServerEndpoints(unittest.TestCase):
             data = json.loads(content.decode())
             self.assertEqual(len(data), 2)  # Corrupt city skipped, valid cities preserved
 
+    # =========================================================================
+    # FEAT-01: Custom Hail Threat & Severe Threshold Alert Engine Tests
+    # =========================================================================
+
+    def test_feat01_threshold_parameter_validation(self):
+        """FEAT-01: Parameter validation for /api/threat/threshold-check (lat, lon, min_hail, min_score, max_eta, radius)."""
+        invalid_queries = [
+            "/api/threat/threshold-check",                                # Missing lat and lon
+            "/api/threat/threshold-check?lat=32.7",                       # Missing lon
+            "/api/threat/threshold-check?lat=nan&lon=-96.8",             # NaN lat
+            "/api/threat/threshold-check?lat=95.0&lon=-96.8",            # Out of bounds lat
+            "/api/threat/threshold-check?lat=32.7&lon=190.0",            # Out of bounds lon
+            "/api/threat/threshold-check?lat=32.7&lon=-96.8&min_hail=-1.0", # Negative min_hail
+            "/api/threat/threshold-check?lat=32.7&lon=-96.8&min_hail=15.0", # min_hail > 10.0
+            "/api/threat/threshold-check?lat=32.7&lon=-96.8&min_score=-5",  # Negative min_score
+            "/api/threat/threshold-check?lat=32.7&lon=-96.8&min_score=150", # min_score > 100
+            "/api/threat/threshold-check?lat=32.7&lon=-96.8&max_eta=0",     # max_eta < 1
+            "/api/threat/threshold-check?lat=32.7&lon=-96.8&max_eta=500",   # max_eta > 360
+            "/api/threat/threshold-check?lat=32.7&lon=-96.8&radius=-10",    # radius < 1
+            "/api/threat/threshold-check?lat=32.7&lon=-96.8&radius=1000",   # radius > 500
+        ]
+        for q in invalid_queries:
+            with self.subTest(query=q):
+                try:
+                    self.get_url(q)
+                    self.fail(f"Expected HTTP 400 for invalid query {q}")
+                except urllib.error.HTTPError as e:
+                    self.assertEqual(e.code, 400)
+                    body = e.read().decode('utf-8')
+                    e.close()
+                    data = json.loads(body)
+                    self.assertIn('error', data)
+
+    def test_feat01_threshold_evaluation_business_logic(self):
+        """FEAT-01: Direct evaluation of evaluate_threat_threshold business logic under varying storm scenarios."""
+        # Scenario 1: Triggered threat (large hail, severe score, storm within ETA window)
+        mock_assess_severe = {
+            'assessment': {
+                'score': 85,
+                'level': 'WARNING',
+                'max_hail_inches': 1.75,
+                'max_hail_label': 'Golf Ball Size (1.75 in)',
+            },
+            'regional_warnings': {
+                'warnings': [{
+                    'distance_miles': 15.0,
+                    'motion': {'eta_mins': 22}
+                }]
+            },
+            'nws_alerts': []
+        }
+        with mock.patch('hail_core.perform_full_assessment', return_value=mock_assess_severe):
+            res = evaluate_threat_threshold(32.7767, -96.7970, min_hail=1.00, min_score=70, max_eta=45)
+            self.assertEqual(res['status'], 'ok')
+            self.assertTrue(res['evaluation']['triggered'])
+            self.assertTrue(res['evaluation']['hail_threshold_met'])
+            self.assertTrue(res['evaluation']['score_threshold_met'])
+            self.assertTrue(res['evaluation']['eta_threshold_met'])
+            self.assertIn("CRITICAL ACTION REQUIRED", res['directive'])
+            self.assertEqual(res['current_metrics']['nearest_storm_eta_mins'], 22)
+            self.assertEqual(len(res['evaluation']['matched_reasons']), 3)
+
+        # Scenario 2: Suppressed by ETA (storm is 75 mins away, user threshold is max_eta=30)
+        mock_assess_far = {
+            'assessment': {
+                'score': 85,
+                'level': 'WARNING',
+                'max_hail_inches': 2.00,
+                'max_hail_label': 'Hen Egg Size (2.00 in)'
+            },
+            'regional_warnings': {
+                'warnings': [{
+                    'distance_miles': 45.0,
+                    'motion': {'eta_mins': 75}
+                }]
+            },
+            'nws_alerts': []
+        }
+        with mock.patch('hail_core.perform_full_assessment', return_value=mock_assess_far):
+            res_far = evaluate_threat_threshold(32.7767, -96.7970, min_hail=1.00, min_score=70, max_eta=30)
+            self.assertFalse(res_far['evaluation']['triggered'])
+            self.assertFalse(res_far['evaluation']['eta_threshold_met'])
+            self.assertIn("MONITORING ACTIVE", res_far['directive'])
+
+        # Scenario 3: Suppressed by hail size (0.50" hail vs user min_hail=1.50" and min_score=70)
+        mock_assess_mild = {
+            'assessment': {
+                'score': 45,
+                'level': 'WATCH',
+                'max_hail_inches': 0.50,
+                'max_hail_label': 'Marble Size (0.50 in)'
+            },
+            'regional_warnings': {'warnings': []},
+            'nws_alerts': []
+        }
+        with mock.patch('hail_core.perform_full_assessment', return_value=mock_assess_mild):
+            res_mild = evaluate_threat_threshold(32.7767, -96.7970, min_hail=1.50, min_score=70, max_eta=45)
+            self.assertFalse(res_mild['evaluation']['triggered'])
+            self.assertFalse(res_mild['evaluation']['hail_threshold_met'])
+            self.assertFalse(res_mild['evaluation']['score_threshold_met'])
+
+        # Scenario 4: Direct warning zone overhead (point alerts has active warning)
+        mock_assess_overhead = {
+            'assessment': {
+                'score': 75,
+                'level': 'WARNING',
+                'max_hail_inches': 1.00,
+                'max_hail_label': 'Quarter Size (1.00 in)'
+            },
+            'regional_warnings': {'warnings': []},
+            'nws_alerts': [{'event': 'Severe Thunderstorm Warning', 'hail_size_in': 1.00}]
+        }
+        with mock.patch('hail_core.perform_full_assessment', return_value=mock_assess_overhead):
+            res_overhead = evaluate_threat_threshold(32.7767, -96.7970, min_hail=1.00, min_score=70, max_eta=45)
+            self.assertTrue(res_overhead['evaluation']['triggered'])
+            self.assertTrue(res_overhead['evaluation']['eta_threshold_met'])
+
+    def test_feat01_threshold_endpoint_integration(self):
+        """FEAT-01: Integration test for GET /api/threat/threshold-check HTTP response schema."""
+        status, headers, content = self.get_url("/api/threat/threshold-check?lat=32.7767&lon=-96.7970&min_hail=1.0&min_score=70&max_eta=45")
+        self.assertEqual(status, 200)
+        self.assertIn("application/json", headers.get('Content-Type'))
+        data = json.loads(content.decode('utf-8'))
+        self.assertEqual(data.get('status'), 'ok')
+        self.assertIn('timestamp', data)
+        self.assertIn('rule_criteria', data)
+        self.assertIn('current_metrics', data)
+        self.assertIn('evaluation', data)
+        self.assertIn('directive', data)
+        eval_obj = data['evaluation']
+        for k in ['triggered', 'hail_threshold_met', 'score_threshold_met', 'eta_threshold_met', 'matched_reasons']:
+            self.assertIn(k, eval_obj)
+
+    def test_feat01_threshold_offline_outage_fallback(self):
+        """FEAT-01: Verify threshold check returns HTTP 200 and triggered=False when weather sensors fail."""
+        with mock.patch('hail_core.perform_full_assessment', return_value={}):
+            status, headers, content = self.get_url("/api/threat/threshold-check?lat=32.7767&lon=-96.7970")
+            self.assertEqual(status, 200)
+            data = json.loads(content.decode('utf-8'))
+            self.assertEqual(data['status'], 'ok')
+            self.assertFalse(data['evaluation']['triggered'])
+            self.assertIn("MONITORING ACTIVE", data['directive'])
+
+    def test_feat01_threshold_ui_and_audio_gating(self):
+        """FEAT-01: Verify static frontend contains threshold settings UI modal, badge, and audio gating logic."""
+        with open(os.path.join(STATIC_DIR, 'index.html'), 'r', encoding='utf-8') as f:
+            html = f.read()
+        self.assertIn('id="threshold-cfg-btn"', html)
+        self.assertIn('id="threshold-modal"', html)
+        self.assertIn('id="active-rule-badge"', html)
+        self.assertIn('id="cfg-min-hail"', html)
+        self.assertIn('id="cfg-min-score"', html)
+        self.assertIn('id="cfg-max-eta"', html)
+
+        with open(os.path.join(STATIC_DIR, 'app.js'), 'r', encoding='utf-8') as f:
+            js = f.read()
+        self.assertIn('/api/threat/threshold-check', js)
+        self.assertIn('thresholdConfig', js)
+        self.assertIn('updateActiveRuleBadge', js)
+
+    # =========================================================================
+    # FEAT-02: Bounding Box & Transit Corridor Hail Threat Scanner Tests
+    # =========================================================================
+
+    def test_feat02_bbox_parameter_validation(self):
+        """FEAT-02: Parameter validation for /api/hail/bbox (min_lat, min_lon, max_lat, max_lon, hours)."""
+        invalid_bbox_queries = [
+            "/api/hail/bbox",                                                     # Missing all params
+            "/api/hail/bbox?min_lat=32.5&min_lon=-97.5",                         # Incomplete params
+            "/api/hail/bbox?min_lat=35.0&min_lon=-97.5&max_lat=32.0&max_lon=-96.5", # Inverted latitude (min > max)
+            "/api/hail/bbox?min_lat=32.0&min_lon=-96.5&max_lat=35.0&max_lon=-97.5", # Inverted longitude (min > max)
+            "/api/hail/bbox?min_lat=-95.0&min_lon=-97.5&max_lat=35.0&max_lon=-96.5",# Out of bounds min_lat
+            "/api/hail/bbox?min_lat=32.0&min_lon=-190.0&max_lat=35.0&max_lon=-96.5",# Out of bounds min_lon
+            "/api/hail/bbox?min_lat=nan&min_lon=-97.5&max_lat=35.0&max_lon=-96.5",   # NaN coordinate
+            "/api/hail/bbox?min_lat=32.0&min_lon=-97.5&max_lat=35.0&max_lon=-96.5&hours=-1", # Negative hours
+            "/api/hail/bbox?min_lat=32.0&min_lon=-97.5&max_lat=35.0&max_lon=-96.5&hours=1000",# Hours > 720
+        ]
+        for q in invalid_bbox_queries:
+            with self.subTest(query=q):
+                try:
+                    self.get_url(q)
+                    self.fail(f"Expected HTTP 400 for invalid query {q}")
+                except urllib.error.HTTPError as e:
+                    self.assertEqual(e.code, 400)
+                    body = e.read().decode('utf-8')
+                    e.close()
+                    data = json.loads(body)
+                    self.assertIn('error', data)
+
+    def test_feat02_bbox_spatial_intersection_and_metrics(self):
+        """FEAT-02: Direct unit tests of geospatial containment and scan_hail_bbox aggregation."""
+        # 1. Point containment test
+        self.assertTrue(is_point_in_bbox(33.0, -97.0, 32.0, -98.0, 34.0, -96.0))
+        self.assertFalse(is_point_in_bbox(35.0, -97.0, 32.0, -98.0, 34.0, -96.0))
+        self.assertFalse(is_point_in_bbox(None, -97.0, 32.0, -98.0, 34.0, -96.0))
+
+        # 2. Polygon intersection test
+        poly_geom = {
+            'type': 'Polygon',
+            'coordinates': [[
+                [-97.2, 32.8],
+                [-96.8, 32.8],
+                [-96.8, 33.2],
+                [-97.2, 33.2],
+                [-97.2, 32.8]
+            ]]
+        }
+        self.assertTrue(is_geometry_intersecting_bbox(poly_geom, 32.5, -97.5, 33.5, -96.5))
+        self.assertFalse(is_geometry_intersecting_bbox(poly_geom, 35.0, -97.5, 36.0, -96.5))
+
+        # 3. Direct scan_hail_bbox aggregation test with mock feeds
+        mock_warnings = {
+            'warnings': [
+                {
+                    'id': 'warn-in-corridor',
+                    'event': 'Severe Thunderstorm Warning',
+                    'category': 'SEVERE_TSTORM',
+                    'severity': 'Severe',
+                    'hail_size_in': 1.75,
+                    'center_lat': 33.0,
+                    'center_lon': -97.0,
+                    'geometry': poly_geom
+                },
+                {
+                    'id': 'warn-out-corridor',
+                    'event': 'Flash Flood Warning',
+                    'category': 'FLASH_FLOOD',
+                    'severity': 'Severe',
+                    'hail_size_in': 0.0,
+                    'center_lat': 38.0,
+                    'center_lon': -97.0,
+                    'geometry': {
+                        'type': 'Polygon',
+                        'coordinates': [[[-97.2, 37.8], [-96.8, 37.8], [-96.8, 38.2], [-97.2, 38.2], [-97.2, 37.8]]]
+                    }
+                }
+            ]
+        }
+        mock_reports = [
+            {'latitude': 33.1, 'longitude': -97.1, 'hail_size_in': 2.0, 'source_type': 'Spotter', 'valid': '2026-10-03T18:00:00Z'},
+            {'latitude': 32.9, 'longitude': -96.9, 'hail_size_in': 1.0, 'source_type': 'mPING', 'valid': '2026-10-03T18:00:00Z'},
+            {'latitude': 39.0, 'longitude': -97.0, 'hail_size_in': 2.5, 'source_type': 'Spotter', 'valid': '2026-10-03T18:00:00Z'} # Outside
+        ]
+
+        with mock.patch('hail_core.fetch_active_nws_warnings', return_value=mock_warnings), \
+             mock.patch('hail_core.fetch_iem_lsr_reports', return_value=mock_reports):
+            res = scan_hail_bbox(32.5, -97.5, 33.5, -96.5, min_hail=0.0, hours=24)
+            self.assertEqual(res['status'], 'ok')
+            self.assertEqual(res['corridor_metrics']['total_warnings'], 1)
+            self.assertEqual(res['corridor_metrics']['total_hail_reports'], 2)
+            self.assertEqual(res['corridor_metrics']['max_hail_inches'], 2.0)
+            self.assertIn("Hen Egg", res['corridor_metrics']['max_hail_label'])
+            self.assertEqual(res['corridor_metrics']['highest_severity'], 'DESTRUCTIVE_HAIL')
+            self.assertGreaterEqual(res['corridor_metrics']['composite_corridor_score'], 75)
+            self.assertEqual(len(res['geojson']['features']), 3) # 1 warning + 2 reports
+
+    def test_feat02_bbox_endpoint_integration(self):
+        """FEAT-02: Integration test for GET /api/hail/bbox HTTP endpoint."""
+        status, headers, content = self.get_url("/api/hail/bbox?min_lat=32.5&min_lon=-97.6&max_lat=35.6&max_lon=-96.6")
+        self.assertEqual(status, 200)
+        self.assertIn("application/json", headers.get('Content-Type'))
+        data = json.loads(content.decode('utf-8'))
+        self.assertEqual(data.get('status'), 'ok')
+        self.assertIn('bbox', data)
+        self.assertIn('corridor_metrics', data)
+        self.assertIn('contained_warnings', data)
+        self.assertIn('contained_reports', data)
+        self.assertIn('geojson', data)
+        metrics = data['corridor_metrics']
+        for k in ['total_warnings', 'total_hail_reports', 'max_hail_inches', 'max_hail_label', 'highest_severity', 'composite_corridor_score']:
+            self.assertIn(k, metrics)
+
+    def test_feat02_bbox_empty_corridor_offline_fallback(self):
+        """FEAT-02: Verify /api/hail/bbox returns HTTP 200 with 0 metrics during empty/quiet conditions."""
+        with mock.patch('hail_core.fetch_active_nws_warnings', return_value={'warnings': []}), \
+             mock.patch('hail_core.fetch_iem_lsr_reports', return_value=[]):
+            status, headers, content = self.get_url("/api/hail/bbox?min_lat=30.0&min_lon=-100.0&max_lat=31.0&max_lon=-99.0")
+            self.assertEqual(status, 200)
+            data = json.loads(content.decode('utf-8'))
+            self.assertEqual(data['corridor_metrics']['total_warnings'], 0)
+            self.assertEqual(data['corridor_metrics']['total_hail_reports'], 0)
+            self.assertEqual(data['corridor_metrics']['composite_corridor_score'], 0)
+            self.assertEqual(data['corridor_metrics']['highest_severity'], 'NONE')
+
+    def test_feat02_bbox_ui_drawer_and_presets(self):
+        """FEAT-02: Verify static frontend contains corridor drawer, preset highway corridor buttons, and JS scanner."""
+        with open(os.path.join(STATIC_DIR, 'index.html'), 'r', encoding='utf-8') as f:
+            html = f.read()
+        self.assertIn('id="btn-bbox-mode"', html)
+        self.assertIn('id="corridor-drawer"', html)
+        self.assertIn('I-35 Texas-Oklahoma Corridor', html)
+        self.assertIn('I-70 Colorado-Kansas', html)
+        self.assertIn('I-80 Nebraska-Iowa', html)
+
+        with open(os.path.join(STATIC_DIR, 'app.js'), 'r', encoding='utf-8') as f:
+            js = f.read()
+        self.assertIn('/api/hail/bbox', js)
+        self.assertIn('loadCorridorBbox', js)
+        self.assertIn('corridorDrawer', js)
+
+    # =========================================================================
+    # FEAT-03: Operations Threat Dossier Export Engine Tests
+    # =========================================================================
+
+    def test_feat03_dossier_parameter_validation(self):
+        """FEAT-03: Parameter validation for /api/export/threat-dossier (lat, lon, radius, format)."""
+        invalid_dossier_queries = [
+            "/api/export/threat-dossier",                          # Missing coords
+            "/api/export/threat-dossier?lat=32.7",                 # Missing lon
+            "/api/export/threat-dossier?lat=nan&lon=-96.8",        # NaN
+            "/api/export/threat-dossier?lat=95.0&lon=-96.8",       # Out of bounds lat
+            "/api/export/threat-dossier?lat=32.7&lon=-96.8&radius=-5", # Negative radius
+            "/api/export/threat-dossier?lat=32.7&lon=-96.8&format=xml", # Unsupported format
+            "/api/export/threat-dossier?lat=32.7&lon=-96.8&format=pdf", # Unsupported format
+        ]
+        for q in invalid_dossier_queries:
+            with self.subTest(query=q):
+                try:
+                    self.get_url(q)
+                    self.fail(f"Expected HTTP 400 for invalid query {q}")
+                except urllib.error.HTTPError as e:
+                    self.assertEqual(e.code, 400)
+                    body = e.read().decode('utf-8')
+                    e.close()
+                    data = json.loads(body)
+                    self.assertIn('error', data)
+
+    def test_feat03_dossier_text_format(self):
+        """FEAT-03: Verify formatted ASCII Plaintext Operations Threat Briefing export."""
+        status, headers, content = self.get_url("/api/export/threat-dossier?lat=32.7767&lon=-96.7970&format=text")
+        self.assertEqual(status, 200)
+        self.assertIn("text/plain", headers.get('Content-Type'))
+        text = content.decode('utf-8')
+        self.assertIn("HAILWARN SEVERE WEATHER OPERATIONS THREAT DOSSIER", text)
+        self.assertIn("DOSSIER ID:      HW-", text)
+        self.assertIn("COORDINATES:     32.7767° N, 96.7970° W", text)
+        self.assertIn("HAIL RISK SCORE:", text)
+        self.assertIn("THREAT SEVERITY LEVEL:", text)
+        self.assertIn("ACTIVE NWS WARNING BULLETINS", text)
+        self.assertIn("VERIFIED GROUND TRUTH OBSERVATIONS", text)
+        self.assertIn("ATMOSPHERIC CONVECTIVE SOUNDING PROFILE", text)
+        self.assertIn("PROTECTIVE ACTION CHECKLIST", text)
+
+    def test_feat03_dossier_csv_format(self):
+        """FEAT-03: Verify RFC 4180 CSV Spreadsheet Operations Threat Dossier export."""
+        status, headers, content = self.get_url("/api/export/threat-dossier?lat=32.7767&lon=-96.7970&format=csv")
+        self.assertEqual(status, 200)
+        self.assertIn("text/csv", headers.get('Content-Type'))
+        content_disp = headers.get('Content-Disposition', '')
+        self.assertIn('attachment', content_disp)
+        self.assertIn('filename="hailwarn_dossier_', content_disp)
+
+        csv_text = content.decode('utf-8')
+        self.assertIn("# HAILWARN OPERATIONS THREAT DOSSIER - ASSESSMENT KEY METRICS", csv_text)
+        self.assertIn("# DETAILED WARNINGS AND GROUND OBSERVATIONS LOG", csv_text)
+
+        # Parse with standard library csv.reader to ensure RFC 4180 validity
+        reader = csv.reader(csv_text.splitlines())
+        rows = list(reader)
+        self.assertGreaterEqual(len(rows), 5)
+        # Check assessment metrics row
+        metrics_header = rows[1]
+        self.assertIn("Dossier ID", metrics_header)
+        self.assertIn("Threat Score", metrics_header)
+        self.assertIn("Max Hail Inches", metrics_header)
+
+    def test_feat03_dossier_json_format(self):
+        """FEAT-03: Verify structured JSON Operations Threat Dossier export."""
+        status, headers, content = self.get_url("/api/export/threat-dossier?lat=32.7767&lon=-96.7970&format=json")
+        self.assertEqual(status, 200)
+        self.assertIn("application/json", headers.get('Content-Type'))
+        data = json.loads(content.decode('utf-8'))
+        self.assertEqual(data.get('status'), 'ok')
+        self.assertIn('dossier_id', data)
+        self.assertIn('timestamp', data)
+        self.assertIn('location', data)
+        self.assertIn('assessment', data)
+        self.assertIn('contained_warnings', data)
+        self.assertIn('contained_reports', data)
+        self.assertIn('convective_data', data)
+        self.assertIn('geojson', data)
+
+    def test_feat03_dossier_offline_resilience(self):
+        """FEAT-03: Verify dossier export safely completes without crashing when external APIs fail."""
+        with mock.patch('hail_core.perform_full_assessment', return_value={}):
+            for fmt in ['text', 'csv', 'json']:
+                with self.subTest(format=fmt):
+                    status, headers, content = self.get_url(f"/api/export/threat-dossier?lat=32.7767&lon=-96.7970&format={fmt}")
+                    self.assertEqual(status, 200)
+                    self.assertGreater(len(content), 0)
+
+    def test_feat03_dossier_ui_buttons(self):
+        """FEAT-03: Verify static frontend briefing modal contains CSV, plaintext, and JSON export buttons."""
+        with open(os.path.join(STATIC_DIR, 'index.html'), 'r', encoding='utf-8') as f:
+            html = f.read()
+        self.assertIn('id="copy-briefing-btn"', html)
+        self.assertIn('id="download-briefing-btn"', html)
+        self.assertIn('id="download-csv-btn"', html)
+        self.assertIn('id="json-briefing-btn"', html)
+
+        with open(os.path.join(STATIC_DIR, 'app.js'), 'r', encoding='utf-8') as f:
+            js = f.read()
+        self.assertIn('/api/export/threat-dossier', js)
+        self.assertIn('download-csv-btn', js)
+
 
 if __name__ == '__main__':
     unittest.main()
+
 

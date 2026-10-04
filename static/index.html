@@ -68,6 +68,11 @@
         </div>
       </div>
 
+      <!-- Threshold Settings Button -->
+      <button id="threshold-cfg-btn" class="ops-btn btn-threshold" title="Configure Custom Hail & Threat Alert Thresholds">
+        <i class="fa-solid fa-sliders text-amber"></i> <span>Thresholds</span>
+      </button>
+
       <!-- Export Briefing Button -->
       <button id="briefing-btn" class="ops-btn btn-briefing" title="Generate & Export Hail Threat Briefing">
         <i class="fa-solid fa-file-shield text-cyan"></i> <span>Briefing</span>
@@ -130,6 +135,11 @@
         <span id="dbz-val" class="dbz-val">-- dBZ</span>
       </div>
 
+      <div class="metric-pill hide-mobile" id="rule-badge-pill" title="Active Custom Hail Alarm Thresholds">
+        <span class="m-label">ALARM RULE</span>
+        <span id="active-rule-badge" class="rule-badge">HAIL ≥ 1.00" | SCORE ≥ 70% | ETA ≤ 45m</span>
+      </div>
+
       <div class="metric-pill hide-mobile">
         <span class="m-label">NEXT REFRESH</span>
         <span id="countdown-val" class="timer-val">60s</span>
@@ -169,6 +179,10 @@
 
           <button id="radar-sweep-btn" class="hud-btn active" title="Toggle Real-Time 360° Doppler Radar Sweep Beam">
             <i class="fa-solid fa-arrows-spin text-green"></i> <span id="sweep-btn-label">Sweep: ON</span>
+          </button>
+
+          <button id="btn-bbox-mode" class="hud-btn" title="Toggle Transit Corridor & Bounding Box Threat Scanner">
+            <i class="fa-solid fa-route text-cyan"></i> <span id="bbox-btn-label">Corridor Scanner</span>
           </button>
         </div>
 
@@ -390,6 +404,53 @@
         <div class="weather-footer">
           <span class="weather-coords-sub" id="cw-coords">32.777° N, 96.797° W</span>
           <span class="weather-updated-sub" id="cw-updated">Connecting...</span>
+        </div>
+      </div>
+
+      <!-- CORRIDOR HAZARD DRAWER (Transit Route & Bounding Box Scanner) -->
+      <div id="corridor-drawer" class="corridor-drawer" style="display: none;">
+        <div class="corridor-drawer-header">
+          <div class="drawer-title">
+            <i class="fa-solid fa-route text-cyan"></i>
+            <span>TRANSIT CORRIDOR & BOUNDING BOX HAIL SCANNER</span>
+            <span id="corridor-status-badge" class="corridor-badge badge-scanning">CORRIDOR SCANNER</span>
+          </div>
+          <div class="drawer-actions">
+            <button id="close-corridor-drawer-btn" class="drawer-close-btn" title="Close Corridor Drawer">&times;</button>
+          </div>
+        </div>
+        <div class="corridor-drawer-body">
+          <div class="corridor-presets-bar">
+            <span class="preset-label"><i class="fa-solid fa-bookmark text-amber"></i> High-Threat Corridors:</span>
+            <button class="preset-btn" data-minlat="32.5" data-minlon="-97.6" data-maxlat="35.6" data-maxlon="-96.6">I-35 Texas-Oklahoma Corridor</button>
+            <button class="preset-btn" data-minlat="38.8" data-minlon="-105.2" data-maxlat="40.3" data-maxlon="-97.0">I-70 Colorado-Kansas</button>
+            <button class="preset-btn" data-minlat="40.8" data-minlon="-100.5" data-maxlat="42.0" data-maxlon="-93.5">I-80 Nebraska-Iowa</button>
+          </div>
+          <div class="corridor-metrics-grid">
+            <div class="c-metric-card">
+              <span class="cm-label">COMPOSITE DANGER SCORE</span>
+              <span id="corridor-score-val" class="cm-val text-amber">--%</span>
+            </div>
+            <div class="c-metric-card">
+              <span class="cm-label">CORRIDOR SEVERITY</span>
+              <span id="corridor-severity-val" class="cm-val">NONE</span>
+            </div>
+            <div class="c-metric-card">
+              <span class="cm-label">MAX HAIL IN CORRIDOR</span>
+              <span id="corridor-maxhail-val" class="cm-val">--</span>
+            </div>
+            <div class="c-metric-card">
+              <span class="cm-label">ACTIVE WARNINGS</span>
+              <span id="corridor-warnings-val" class="cm-val">0</span>
+            </div>
+            <div class="c-metric-card">
+              <span class="cm-label">HAIL REPORTS (LSR)</span>
+              <span id="corridor-reports-val" class="cm-val">0</span>
+            </div>
+          </div>
+          <div class="corridor-bounds-info">
+            <span id="corridor-bounds-text">Select a transit corridor preset or activate scanner mode to inspect bounding box hazards.</span>
+          </div>
         </div>
       </div>
 
@@ -653,11 +714,67 @@
       </div>
       <div class="modal-body">
         <div class="briefing-actions">
-          <button id="copy-briefing-btn" class="ops-btn btn-primary"><i class="fa-solid fa-copy"></i> Copy Text</button>
-          <button id="download-briefing-btn" class="ops-btn btn-secondary"><i class="fa-solid fa-download"></i> Download Report</button>
+          <button id="copy-briefing-btn" class="ops-btn btn-primary"><i class="fa-solid fa-copy"></i> Copy Operations Brief</button>
+          <button id="download-briefing-btn" class="ops-btn btn-secondary"><i class="fa-solid fa-file-lines"></i> Download Plaintext Briefing</button>
+          <button id="download-csv-btn" class="ops-btn btn-secondary"><i class="fa-solid fa-file-csv text-green"></i> Download CSV Dossier</button>
           <button id="json-briefing-btn" class="ops-btn btn-secondary"><i class="fa-solid fa-code"></i> Copy JSON</button>
         </div>
         <textarea id="briefing-content" readonly class="briefing-textarea"></textarea>
+      </div>
+    </div>
+  </div>
+
+  <!-- THRESHOLD SETTINGS MODAL (FEAT-01) -->
+  <div id="threshold-modal" class="modal-backdrop" style="display: none;">
+    <div class="modal-card threshold-modal-card">
+      <div class="modal-header">
+        <div class="modal-title">
+          <i class="fa-solid fa-sliders text-amber"></i>
+          <span>SEVERE HAIL ALARM THRESHOLD SETTINGS</span>
+        </div>
+        <button id="close-threshold-btn" class="modal-close-btn">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p class="modal-subtitle">Configure custom criteria to trigger audio sirens and voice warnings, preventing false alarms and alert fatigue.</p>
+        <div class="threshold-form-grid">
+          <div class="form-group">
+            <label for="cfg-min-hail"><i class="fa-solid fa-circle-dot text-amber"></i> Minimum Hail Alarm Size</label>
+            <select id="cfg-min-hail" class="ops-select">
+              <option value="0.50">0.50" - Marble (Sub-Severe)</option>
+              <option value="0.75">0.75" - Penny</option>
+              <option value="1.00" selected>1.00" - Quarter (NWS Severe Threshold)</option>
+              <option value="1.50">1.50" - Ping Pong</option>
+              <option value="1.75">1.75" - Golf Ball (Vehicle Damage Risk)</option>
+              <option value="2.50">2.50" - Tennis Ball (Destructive)</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="cfg-min-score"><i class="fa-solid fa-gauge-high text-cyan"></i> Minimum Threat Score</label>
+            <select id="cfg-min-score" class="ops-select">
+              <option value="40">40% - Moderate Threat</option>
+              <option value="60">60% - Elevated Risk</option>
+              <option value="70" selected>70% - Severe Warning Trigger</option>
+              <option value="85">85% - Extreme / Catastrophic Only</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="cfg-max-eta"><i class="fa-solid fa-clock text-purple"></i> Maximum Storm ETA (Closing Window)</label>
+            <select id="cfg-max-eta" class="ops-select">
+              <option value="15">Within 15 minutes</option>
+              <option value="30">Within 30 minutes</option>
+              <option value="45" selected>Within 45 minutes</option>
+              <option value="60">Within 60 minutes</option>
+            </select>
+          </div>
+        </div>
+        <div class="threshold-status-preview" id="threshold-preview-box">
+          <div class="preview-title"><i class="fa-solid fa-circle-info text-cyan"></i> Active Rule Directive:</div>
+          <div id="threshold-preview-text">Siren and voice alerts will trigger only when hail size is ≥ 1.00" OR Threat Score is ≥ 70%, with an approaching storm ETA ≤ 45 mins.</div>
+        </div>
+        <div class="threshold-modal-actions">
+          <button id="save-threshold-btn" class="ops-btn btn-primary"><i class="fa-solid fa-check"></i> Apply Rules</button>
+          <button id="reset-threshold-btn" class="ops-btn btn-secondary"><i class="fa-solid fa-rotate-left"></i> Reset Defaults</button>
+        </div>
       </div>
     </div>
   </div>
