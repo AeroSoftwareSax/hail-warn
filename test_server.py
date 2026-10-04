@@ -55,12 +55,13 @@ class MockResponse:
         self.data_bytes = data_bytes
         self.status = status
         self.headers = headers or {'Content-Type': 'application/json'}
+        self.closed = False
 
     def read(self):
         return self.data_bytes
 
     def close(self):
-        pass
+        self.closed = True
 
     def __enter__(self):
         return self

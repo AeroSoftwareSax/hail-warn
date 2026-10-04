@@ -241,12 +241,12 @@ def fetch_nws_point_alerts(lat, lon):
             try:
                 hail_size = float(hail_tags[0])
             except (ValueError, TypeError):
-                pass
+                hail_size = None
         elif isinstance(hail_tags, (int, float, str)):
             try:
                 hail_size = float(hail_tags)
             except (ValueError, TypeError):
-                pass
+                hail_size = None
 
         if hail_size is None and description and isinstance(description, str):
             # Look for patterns like "HAIL...1.75 INCHES" or "hail up to quarter size"
@@ -255,7 +255,7 @@ def fetch_nws_point_alerts(lat, lon):
                 try:
                     hail_size = float(match.group(1))
                 except (ValueError, TypeError):
-                    pass
+                    hail_size = None
 
         threat_type = 'RADAR INDICATED'
         if isinstance(hail_threat, list) and hail_threat and hail_threat[0]:
@@ -345,7 +345,7 @@ def fetch_iem_lsr_reports(lat, lon, radius_miles=45, hours=168):
             try:
                 mag_float = float(mag)
             except (ValueError, TypeError):
-                pass
+                mag_float = None
 
         # If magnitude missing or not float, try to extract from remark
         if mag_float is None and remark:
@@ -354,7 +354,7 @@ def fetch_iem_lsr_reports(lat, lon, radius_miles=45, hours=168):
                 try:
                     mag_float = float(m.group(1))
                 except ValueError:
-                    pass
+                    mag_float = None
 
         # Validate magnitude range for hail (0.1 to 6.0 inches)
         if mag_float is None or mag_float <= 0.0 or mag_float > 8.0:
@@ -578,12 +578,12 @@ def fetch_active_nws_warnings(lat=None, lon=None, radius_miles=250):
                 try:
                     hail_size = float(hail_tags[0])
                 except (ValueError, TypeError):
-                    pass
+                    hail_size = None
             elif isinstance(hail_tags, (int, float, str)):
                 try:
                     hail_size = float(hail_tags)
                 except (ValueError, TypeError):
-                    pass
+                    hail_size = None
             
             description = props.get('description', '') or ''
             headline = props.get('headline', '') or ''
@@ -595,7 +595,7 @@ def fetch_active_nws_warnings(lat=None, lon=None, radius_miles=250):
                     try:
                         hail_size = float(m.group(1))
                     except (ValueError, TypeError):
-                        pass
+                        hail_size = None
 
             # Calculate centroid & distance
             center_lat, center_lon = None, None
@@ -610,7 +610,7 @@ def fetch_active_nws_warnings(lat=None, lon=None, radius_miles=250):
                     center_lon = sum(p[0] for p in pts) / len(pts)
                     center_lat = sum(p[1] for p in pts) / len(pts)
             except Exception:
-                pass
+                center_lat, center_lon = None, None
 
             dist_mi = None
             if lat is not None and lon is not None and center_lat is not None:
@@ -669,7 +669,7 @@ def fetch_active_nws_warnings(lat=None, lon=None, radius_miles=250):
                             'projected_path': proj
                         }
                     except Exception:
-                        pass
+                        motion_obj = None
 
             wind_first = None
             if isinstance(wind_tags, list) and wind_tags:
@@ -807,7 +807,7 @@ def fetch_active_nws_warnings(lat=None, lon=None, radius_miles=250):
                 try:
                     hail_f = float(props.get('max_hailtag') or props.get('hailtag'))
                 except (ValueError, TypeError):
-                    pass
+                    hail_f = None
 
             wind_tag = props.get('max_windtag') or props.get('windtag')
             wind_str = f"{wind_tag} MPH" if wind_tag else None
@@ -824,7 +824,7 @@ def fetch_active_nws_warnings(lat=None, lon=None, radius_miles=250):
                     center_lon = sum(p[0] for p in pts) / len(pts)
                     center_lat = sum(p[1] for p in pts) / len(pts)
             except Exception:
-                pass
+                center_lat, center_lon = None, None
 
             dist_mi = None
             if lat is not None and lon is not None and center_lat is not None:
@@ -987,7 +987,7 @@ def fetch_active_national_hotspots():
                         center_lon = sum(p[0] for p in pts) / len(pts)
                         center_lat = sum(p[1] for p in pts) / len(pts)
                 except Exception:
-                    pass
+                    center_lat, center_lon = None, None
             
             area_desc = props.get('areaDesc', 'Active Threat Area') or 'Active Threat Area'
             hail_f = None
