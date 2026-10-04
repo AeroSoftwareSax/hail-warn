@@ -59,6 +59,19 @@ def validate_coordinates(lat_raw, lon_raw):
         raise ValueError(f"Longitude out of bounds [-180, 180]: {lon}")
     return lat, lon
 
+def validate_search_query(q_raw, max_len=200):
+    """Validate free-text search input before using it in outbound requests."""
+    q = str(q_raw if q_raw is not None else '').strip()
+    if not q:
+        return ''
+    if len(q) > max_len:
+        q = q[:max_len]
+    allowed_punct = set(".,-' ")
+    for ch in q:
+        if not (ch.isalnum() or ch in allowed_punct):
+            raise ValueError("Search query contains invalid characters.")
+    return q
+
 def validate_radius(radius_raw, default=45.0):
     if radius_raw is None:
         return default
@@ -391,13 +404,14 @@ class HailWarnRequestHandler(SimpleHTTPRequestHandler):
 
     def handle_search(self, query):
         q_raw = get_query_param(query, 'q', '')
-        q = str(q_raw).strip()
+        try:
+            q = validate_search_query(q_raw, max_len=200)
+        except ValueError as e:
+            self.send_json_response({'error': str(e)}, 400)
+            return
         if not q:
             self.send_json_response([])
             return
-
-        if len(q) > 200:
-            q = q[:200]
 
         enc_q = urllib.parse.quote(q)
         url = f"https://nominatim.openstreetmap.org/search?q={enc_q}&format=json&limit=5&addressdetails=1"
